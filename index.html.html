@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bike Nav ESP32 Controller</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 12px;
+      background: #f3f4f6;
+    }
+
+    .container {
+      max-width: 650px;
+      margin: auto;
+      background: white;
+      padding: 14px;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+    }
+
+    h2 {
+      margin: 0 0 10px 0;
+      text-align: center;
+      color: #1f2937;
+    }
+
+    #status {
+      text-align: center;
+      font-weight: bold;
+      margin-bottom: 10px;
+      color: #dc2626;
+    }
+
+    #map {
+      height: 280px;
+      width: 100%;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+
+    button {
+      width: 100%;
+      padding: 12px;
+      margin: 5px 0;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      cursor: pointer;
+      color: white;
+    }
+
+    #btnConnect {
+      background: #16a34a;
+    }
+
+    #btnDisconnect {
+      background: #dc2626;
+      display: none;
+    }
+
+    #btnFetchRoute {
+      background: #2563eb;
+    }
+
+    #btnSendOnce {
+      background: #7c3aed;
+    }
+
+    #btnSimulate {
+      background: #ea580c;
+    }
+
+    .panel {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 10px;
+      margin: 10px 0;
+    }
+
+    label {
+      display: block;
+      margin-top: 8px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+
+    input,
+    select {
+      width: 100%;
+      padding: 9px;
+      margin-top: 4px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+
+    #logs {
+      height: 140px;
+      overflow-y: auto;
+      background: #111827;
+      color: #22c55e;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 8px;
+      border-radius: 8px;
+      margin-top: 10px;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #4b5563;
+      margin-top: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h2>Bike Nav ESP32 Controller</h2>
+    <div id="status">Disconnected</div>
+
+    <div id="map"></div>
+
+    <button id="btnConnect">1. Connect to ESP32</button>
+    <button id="btnDisconnect">Disconnect</button>
+
+    <div class="panel">
+      <strong>Map Instructions</strong>
+      <div class="hint">
+        Click map once for START.<br />
+        Click map again for END.<br />
+        Click again to reset.
+      </div>
+    </div>
+
+    <button id="btnFetchRoute">2. Fetch Route from OSRM</button>
+
+    <div class="panel">
+      <label>Distance to turn (m)</label>
+      <input type="number" id="distInput" value="150" min="0" />
+
+      <label>Turn type</label>
+      <select id="turnInput">
+        <option value="0">Straight</option>
+        <option value="1">Left</option>
+        <option value="2">Right</option>
+        <option value="3">Slight Left</option>
+        <option value="4">Slight Right</option>
+        <option value="5">U-Turn</option>
+        <option value="6">Arrived</option>
+      </select>
+
+      <label>Speed (km/h)</label>
+      <input type="number" id="speedInput" value="18" min="0" />
+
+      <label>Road name</label>
+      <input type="text" id="roadInput" value="College Road" maxlength="24" />
+    </div>
+
+    <button id="btnSendOnce">3. Send Once to ESP32</button>
+    <button id="btnSimulate">4. Simulate Ride</button>
+
+    <div id="logs">Ready...</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const CHARACTERISTIC_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
+    let device = null;
+    let server = null;
+    let characteristic = null;
+
+    let startMarker = null;
+    let endMarker = null;
+    let routeLine = null;
+
+    let routeCoords = [];
+
+    let simTimer = null;
+    let simIndex = 0;
+    let sending = false;
+
+    const statusDiv = document.getElementById("status");
+    const logDiv = document.getElementById("logs");
+
+    const btnConnect = document.getElementById("btnConnect");
+    const btnDisconnect = document.getElementById("btnDisconnect");
+    const btnFetchRoute = document.getElementById("btnFetchRoute");
+    const btnSendOnce = document.getElementById("btnSendOnce");
+    const btnSimulate = document.getElementById("btnSimulate");
+
+    // ----------------------------------------------------------
+    // Map setup
+    // ----------------------------------------------------------
+    const map = L.map("map").setView([12.9716, 77.5946], 14);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    map.on("click", function (e) {
+      if (!startMarker) {
+        startMarker = L.marker(e.latlng).addTo(map).bindPopup("START");
+        log("Start point set.");
+      } else if (!endMarker) {
+        endMarker = L.marker(e.latlng).addTo(map).bindPopup("END");
+        log("End point set. Fetch route now.");
+      } else {
+        resetRoute();
+        startMarker = L.marker(e.latlng).addTo(map).bindPopup("START");
+        log("Reset. New start point set.");
+      }
+    });
+
+    function resetRoute() {
+      if (startMarker) map.removeLayer(startMarker);
+      if (endMarker) map.removeLayer(endMarker);
+      if (routeLine) map.removeLayer(routeLine);
+
+      startMarker = null;
+      endMarker = null;
+      routeLine = null;
+      routeCoords = [];
+
+      stopSimulation();
+    }
+
+    // ----------------------------------------------------------
+    // Logging
+    // ----------------------------------------------------------
+    function log(msg) {
+      const time = new Date().toLocaleTimeString();
+      logDiv.innerHTML += `[${time}] ${msg}<br>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    function setStatus(text, connected) {
+      statusDiv.innerText = text;
+      statusDiv.style.color = connected ? "#16a34a" : "#dc2626";
+    }
+
+    // ----------------------------------------------------------
+    // Browser support
+    // ----------------------------------------------------------
+    if (!navigator.bluetooth) {
+      alert(
+        "Web Bluetooth is not supported in this browser.\n\n" +
+        "Use Chrome or Edge on Android, or Chrome/Edge on desktop."
+      );
+      btnConnect.disabled = true;
+    }
+
+    // ----------------------------------------------------------
+    // BLE connection
+    // ----------------------------------------------------------
+    btnConnect.addEventListener("click", async () => {
+      try {
+        log("Requesting Bluetooth device...");
+
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [SERVICE_UUID] }]
+        });
+
+        log(`Connecting to ${device.name || "unknown"}...`);
+
+        server = await device.gatt.connect();
+
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+        setStatus("CONNECTED", true);
+        btnConnect.style.display = "none";
+        btnDisconnect.style.display = "block";
+
+        log("BLE connected successfully.");
+      } catch (err) {
+        log("BLE connection failed: " + err.message);
+        alert("Connection failed: " + err.message);
+      }
+    });
+
+    btnDisconnect.addEventListener("click", () => {
+      if (device && device.gatt && device.gatt.connected) {
+        device.gatt.disconnect();
+      }
+
+      setStatus("DISCONNECTED", false);
+      btnConnect.style.display = "block";
+      btnDisconnect.style.display = "none";
+
+      stopSimulation();
+
+      log("Disconnected.");
+    });
+
+    // ----------------------------------------------------------
+    // Chunked BLE writer
+    //
+    // Packet format:
+    // byte 0: 0x01 = JSON chunk
+    // byte 1: sequence number
+    // byte 2: end flag
+    // bytes 3+: payload
+    // ----------------------------------------------------------
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function writePacket(packet) {
+      if (
+        characteristic.properties &&
+        characteristic.properties.writeWithoutResponse
+      ) {
+        await characteristic.writeValueWithoutResponse(packet);
+      } else {
+        await characteristic.writeValue(packet);
+      }
+    }
+
+    async function sendJsonString(jsonString) {
+      if (!characteristic || !server || !server.connected) {
+        throw new Error("Not connected to ESP32");
+      }
+
+      const bytes = new TextEncoder().encode(jsonString);
+
+      const MAX_PAYLOAD = 17; // 3 header + 17 payload = 20 bytes safe BLE packet
+      let offset = 0;
+      let seq = 0;
+
+      while (offset < bytes.length) {
+        const chunkLength = Math.min(MAX_PAYLOAD, bytes.length - offset);
+        const isEnd = offset + chunkLength >= bytes.length ? 1 : 0;
+
+        const packet = new Uint8Array(3 + chunkLength);
+        packet[0] = 0x01;
+        packet[1] = seq & 0xff;
+        packet[2] = isEnd;
+
+        packet.set(bytes.subarray(offset, offset + chunkLength), 3);
+
+        await writePacket(packet);
+
+        offset += chunkLength;
+        seq++;
+
+        await sleep(10);
+      }
+
+      log(`Sent JSON packet: ${bytes.length} bytes`);
+    }
+
+    // ----------------------------------------------------------
+    // Geo helpers
+    // ----------------------------------------------------------
+    function toRad(deg) {
+      return (deg * Math.PI) / 180;
+    }
+
+    function toDeg(rad) {
+      return (rad * 180) / Math.PI;
+    }
+
+    function haversineDistance(p1, p2) {
+      const R = 6371000;
+
+      const dLat = toRad(p2.lat - p1.lat);
+      const dLon = toRad(p2.lon - p1.lon);
+
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(p1.lat)) *
+          Math.cos(toRad(p2.lat)) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+      return R * c;
+    }
+
+    function bearing(p1, p2) {
+      const φ1 = toRad(p1.lat);
+      const φ2 = toRad(p2.lat);
+      const Δλ = toRad(p2.lon - p1.lon);
+
+      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const x =
+        Math.cos(φ1) * Math.sin(φ2) -
+        Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+
+      const θ = Math.atan2(y, x);
+
+      return (toDeg(θ) + 360) % 360;
+    }
+
+    function angleDiff(a, b) {
+      return ((b - a + 540) % 360) - 180;
+    }
+
+    // ----------------------------------------------------------
+    // Fetch route from OSRM
+    // ----------------------------------------------------------
+    btnFetchRoute.addEventListener("click", async () => {
+      if (!startMarker || !endMarker) {
+        alert("Set START and END on the map first.");
+        return;
+      }
+
+      const s = startMarker.getLatLng();
+      const e = endMarker.getLatLng();
+
+      log("Fetching route from OSRM...");
+
+      const url =
+        `https://router.project-osrm.org/route/v1/driving/` +
+        `${s.lng},${s.lat};${e.lng},${e.lat}` +
+        `?overview=full&geometries=geojson`;
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.code !== "Ok") {
+          throw new Error(data.message || "Routing failed");
+        }
+
+        const coords = data.routes[0].geometry.coordinates;
+
+        routeCoords = coords.map(c => ({
+          lat: c[1],
+          lon: c[0]
+        }));
+
+        log(`Route loaded: ${routeCoords.length} points`);
+        log(`Distance: ${(data.routes[0].distance / 1000).toFixed(2)} km`);
+
+        if (routeLine) map.removeLayer(routeLine);
+
+        const leafletCoords = routeCoords.map(p => [p.lat, p.lon]);
+        routeLine = L.polyline(leafletCoords, { color: "blue" }).addTo(map);
+
+        map.fitBounds(routeLine.getBounds());
+
+        simIndex = 0;
+      } catch (err) {
+        log("Route fetch error: " + err.message);
+        alert("Could not fetch route: " + err.message);
+      }
+    });
+
+    // ----------------------------------------------------------
+    // Build packet
+    // ----------------------------------------------------------
+    function buildPacket(index, manual) {
+      if (routeCoords.length === 0) {
+        // Fallback fake route if no OSRM route loaded
+        const center = map.getCenter();
+
+        const rider = {
+          lat: center.lat,
+          lon: center.lng
+        };
+
+        const pts = [];
+
+        for (let i = 0; i < 6; i++) {
+          pts.push([rider.lat + i * 0.0001, rider.lon + i * 0.0001]);
+        }
+
+        return {
+          lat: rider.lat,
+          lon: rider.lon,
+          hdg: manual ? 0 : 45,
+          spd: manual
+            ? parseFloat(document.getElementById("speedInput").value || 18)
+            : 18,
+          dist: manual
+            ? parseInt(document.getElementById("distInput").value || 150)
+            : 150,
+          turn: manual
+            ? parseInt(document.getElementById("turnInput").value || 0)
+            : 0,
+          road: manual
+            ? document.getElementById("roadInput").value || "Test Road"
+            : "Fake Route",
+          pts: pts
+        };
+      }
+
+      const safeIndex = Math.max(0, Math.min(index, routeCoords.length - 1));
+      const rider = routeCoords[safeIndex];
+
+      const nextIndex = Math.min(safeIndex + 1, routeCoords.length - 1);
+      const next = routeCoords[nextIndex];
+
+      const hdg = bearing(rider, next);
+
+      const pts = [];
+
+      for (let i = safeIndex; i < Math.min(safeIndex + 6, routeCoords.length); i++) {
+        pts.push([routeCoords[i].lat, routeCoords[i].lon]);
+      }
+
+      let dist = 100;
+      let turn = 0;
+      let spd = 18;
+      let road = "OSRM Route";
+
+      if (manual) {
+        dist = parseInt(document.getElementById("distInput").value || 150);
+        turn = parseInt(document.getElementById("turnInput").value || 0);
+        spd = parseFloat(document.getElementById("speedInput").value || 18);
+        road = document.getElementById("roadInput").value || "Road";
+      } else {
+        // Estimate distance to next turn and turn direction
+        let cumulative = 0;
+        turn = 0;
+
+        for (let i = safeIndex; i < routeCoords.length - 1; i++) {
+          cumulative += haversineDistance(routeCoords[i], routeCoords[i + 1]);
+
+          if (i + 2 < routeCoords.length) {
+            const b1 = bearing(routeCoords[i], routeCoords[i + 1]);
+            const b2 = bearing(routeCoords[i + 1], routeCoords[i + 2]);
+
+            const diff = angleDiff(b1, b2);
+
+            if (Math.abs(diff) > 25) {
+              dist = Math.max(20, Math.round(cumulative));
+
+              if (diff < 0) {
+                turn = 1; // left
+              } else {
+                turn = 2; // right
+              }
+
+              break;
+            }
+          }
+        }
+
+        if (!dist || dist <= 0) {
+          dist = Math.max(20, Math.round(cumulative));
+        }
+
+        spd = 18;
+        road = "OSRM Route";
+      }
+
+      return {
+        lat: rider.lat,
+        lon: rider.lon,
+        hdg: hdg,
+        spd: spd,
+        dist: dist,
+        turn: turn,
+        road: road,
+        pts: pts
+      };
+    }
+
+    // ----------------------------------------------------------
+    // Send once
+    // ----------------------------------------------------------
+    btnSendOnce.addEventListener("click", async () => {
+      if (!characteristic || !server || !server.connected) {
+        alert("Connect to ESP32 first.");
+        return;
+      }
+
+      try {
+        const packet = buildPacket(0, true);
+        const json = JSON.stringify(packet);
+
+        await sendJsonString(json);
+
+        log(`Manual send: dist=${packet.dist}, turn=${packet.turn}`);
+      } catch (err) {
+        log("Send error: " + err.message);
+        alert("Send failed: " + err.message);
+      }
+    });
+
+    // ----------------------------------------------------------
+    // Simulate ride
+    // ----------------------------------------------------------
+    function stopSimulation() {
+      if (simTimer) {
+        clearInterval(simTimer);
+        simTimer = null;
+      }
+
+      btnSimulate.innerText = "4. Simulate Ride";
+      log("Simulation stopped.");
+    }
+
+    btnSimulate.addEventListener("click", async () => {
+      if (!characteristic || !server || !server.connected) {
+        alert("Connect to ESP32 first.");
+        return;
+      }
+
+      if (routeCoords.length === 0) {
+        alert("Fetch a route first.");
+        return;
+      }
+
+      if (simTimer) {
+        stopSimulation();
+        return;
+      }
+
+      simIndex = 0;
+
+      btnSimulate.innerText = "Stop Simulation";
+      log("Simulation started.");
+
+      simTimer = setInterval(async () => {
+        if (sending) return;
+
+        sending = true;
+
+        try {
+          const packet = buildPacket(simIndex, false);
+          const json = JSON.stringify(packet);
+
+          await sendJsonString(json);
+
+          log(
+            `Simulate: idx=${simIndex}, dist=${packet.dist}, ` +
+            `turn=${packet.turn}, hdg=${packet.hdg.toFixed(0)}`
+          );
+
+          simIndex++;
+
+          if (simIndex >= routeCoords.length - 1) {
+            simIndex = 0;
+          }
+        } catch (err) {
+          log("Simulation send error: " + err.message);
+          stopSimulation();
+        } finally {
+          sending = false;
+        }
+      }, 1000);
+    });
+  </script>
+</body>
+</html>
