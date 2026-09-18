@@ -41,7 +41,7 @@
     }
 
     #map {
-      height: 280px;
+      height: 300px;
       width: 100%;
       border-radius: 8px;
       margin-bottom: 12px;
@@ -105,7 +105,7 @@
     }
 
     #logs {
-      height: 140px;
+      height: 160px;
       overflow-y: auto;
       background: #111827;
       color: #22c55e;
@@ -139,11 +139,12 @@
       <div class="hint">
         Click map once for START.<br />
         Click map again for END.<br />
-        Click again to reset.
+        Click again to reset.<br /><br />
+        For best route results, click directly on visible roads.
       </div>
     </div>
 
-    <button id="btnFetchRoute">2. Fetch Route from OSRM</button>
+    <button id="btnFetchRoute">2. Fetch Route</button>
 
     <div class="panel">
       <label>Distance to turn (m)</label>
@@ -164,7 +165,7 @@
       <input type="number" id="speedInput" value="18" min="0" />
 
       <label>Road name</label>
-      <input type="text" id="roadInput" value="College Road" maxlength="24" />
+      <input type="text" id="roadInput" value="College Road" maxlength="20" />
     </div>
 
     <button id="btnSendOnce">3. Send Once to ESP32</button>
@@ -188,6 +189,7 @@
     let routeLine = null;
 
     let routeCoords = [];
+    let routeCumulative = [];
 
     let simTimer = null;
     let simIndex = 0;
@@ -202,14 +204,20 @@
     const btnSendOnce = document.getElementById("btnSendOnce");
     const btnSimulate = document.getElementById("btnSimulate");
 
-    // ----------------------------------------------------------
-    // Map setup
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // Map setup using CARTO tiles to avoid OpenStreetMap tile denial
+    // ------------------------------------------------------------
     const map = L.map("map").setView([12.9716, 77.5946], 14);
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap contributors"
-    }).addTo(map);
+    L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+      {
+        attribution:
+          "&copy; OpenStreetMap contributors &copy; CARTO",
+        subdomains: "abcd",
+        maxZoom: 19
+      }
+    ).addTo(map);
 
     map.on("click", function (e) {
       if (!startMarker) {
@@ -234,13 +242,14 @@
       endMarker = null;
       routeLine = null;
       routeCoords = [];
+      routeCumulative = [];
 
       stopSimulation();
     }
 
-    // ----------------------------------------------------------
-    // Logging
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // Logging / status
+    // ------------------------------------------------------------
     function log(msg) {
       const time = new Date().toLocaleTimeString();
       logDiv.innerHTML += `[${time}] ${msg}<br>`;
@@ -252,9 +261,9 @@
       statusDiv.style.color = connected ? "#16a34a" : "#dc2626";
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // Browser support
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     if (!navigator.bluetooth) {
       alert(
         "Web Bluetooth is not supported in this browser.\n\n" +
@@ -263,9 +272,9 @@
       btnConnect.disabled = true;
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // BLE connection
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     btnConnect.addEventListener("click", async () => {
       try {
         log("Requesting Bluetooth device...");
@@ -306,17 +315,24 @@
       log("Disconnected.");
     });
 
-    // ----------------------------------------------------------
-    // Chunked BLE writer
+    // ------------------------------------------------------------
+    // ASCII-safe BLE chunk writer
     //
     // Packet format:
-    // byte 0: 0x01 = JSON chunk
-    // byte 1: sequence number
-    // byte 2: end flag
-    // bytes 3+: payload
-    // ----------------------------------------------------------
+    // byte 0-1: sequence number in hex
+    // byte 2: end flag, 0 = more chunks, 1 = last chunk
+    // byte 3+: JSON text payload
+    // ------------------------------------------------------------
     function sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function asciiOnly(text) {
+      return String(text).replace(/[^\x20-\x7E]/g, "");
+    }
+
+    function hex2(n) {
+      return n.toString(16).padStart(2, "0").toUpperCase();
     }
 
     async function writePacket(packet) {
@@ -335,27 +351,31 @@
         throw new Error("Not connected to ESP32");
       }
 
-      const bytes = new TextEncoder().encode(jsonString);
+      const asciiJson = asciiOnly(jsonString);
+      const bytes = new TextEncoder().encode(asciiJson);
 
-      const MAX_PAYLOAD = 17; // 3 header + 17 payload = 20 bytes safe BLE packet
+      const MAX_PAYLOAD = 17;
+
       let offset = 0;
       let seq = 0;
 
       while (offset < bytes.length) {
         const chunkLength = Math.min(MAX_PAYLOAD, bytes.length - offset);
-        const isEnd = offset + chunkLength >= bytes.length ? 1 : 0;
+        const isEnd = offset + chunkLength >= bytes.length ? "1" : "0";
 
-        const packet = new Uint8Array(3 + chunkLength);
-        packet[0] = 0x01;
-        packet[1] = seq & 0xff;
-        packet[2] = isEnd;
-
-        packet.set(bytes.subarray(offset, offset + chunkLength), 3);
+        const header = hex2(seq) + isEnd;
+        const chunkText = asciiJson.slice(offset, offset + chunkLength);
+        const packetText = header + chunkText;
+        const packet = new TextEncoder().encode(packetText);
 
         await writePacket(packet);
 
         offset += chunkLength;
         seq++;
+
+        if (seq > 255) {
+          throw new Error("Packet too large for 8-bit sequence numbering");
+        }
 
         await sleep(10);
       }
@@ -363,15 +383,23 @@
       log(`Sent JSON packet: ${bytes.length} bytes`);
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // Geo helpers
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     function toRad(deg) {
       return (deg * Math.PI) / 180;
     }
 
     function toDeg(rad) {
       return (rad * 180) / Math.PI;
+    }
+
+    function round6(value) {
+      return Math.round(value * 1e6) / 1e6;
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
     }
 
     function haversineDistance(p1, p2) {
@@ -393,81 +421,200 @@
     }
 
     function bearing(p1, p2) {
-      const φ1 = toRad(p1.lat);
-      const φ2 = toRad(p2.lat);
-      const Δλ = toRad(p2.lon - p1.lon);
+      const phi1 = toRad(p1.lat);
+      const phi2 = toRad(p2.lat);
+      const deltaLambda = toRad(p2.lon - p1.lon);
 
-      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const y = Math.sin(deltaLambda) * Math.cos(phi2);
       const x =
-        Math.cos(φ1) * Math.sin(φ2) -
-        Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+        Math.cos(phi1) * Math.sin(phi2) -
+        Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
 
-      const θ = Math.atan2(y, x);
+      const theta = Math.atan2(y, x);
 
-      return (toDeg(θ) + 360) % 360;
+      return (toDeg(theta) + 360) % 360;
     }
 
     function angleDiff(a, b) {
       return ((b - a + 540) % 360) - 180;
     }
 
-    // ----------------------------------------------------------
-    // Fetch route from OSRM
-    // ----------------------------------------------------------
-    btnFetchRoute.addEventListener("click", async () => {
-      if (!startMarker || !endMarker) {
-        alert("Set START and END on the map first.");
-        return;
+    function sanitizeRoad(text) {
+      return String(text || "")
+        .replace(/[^A-Za-z0-9 .,_-]/g, "")
+        .substring(0, 20)
+        .trim() || "Route";
+    }
+
+    // ------------------------------------------------------------
+    // Route helpers
+    // ------------------------------------------------------------
+    function computeCumulativeDistances(coords) {
+      const arr = [0];
+
+      for (let i = 1; i < coords.length; i++) {
+        const d = haversineDistance(coords[i - 1], coords[i]);
+        arr.push(arr[i - 1] + d);
       }
 
-      const s = startMarker.getLatLng();
-      const e = endMarker.getLatLng();
+      return arr;
+    }
 
-      log("Fetching route from OSRM...");
+    function generateSimpleRoute(start, end, steps = 50) {
+      const coords = [];
 
-      const url =
-        `https://router.project-osrm.org/route/v1/driving/` +
-        `${s.lng},${s.lat};${e.lng},${e.lat}` +
-        `?overview=full&geometries=geojson`;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
 
-      try {
-        const res = await fetch(url);
-        const data = await res.json();
+        const lat = start.lat + (end.lat - start.lat) * t;
+        const lon = start.lng + (end.lng - start.lng) * t;
 
-        if (data.code !== "Ok") {
-          throw new Error(data.message || "Routing failed");
+        const curve = Math.sin(t * Math.PI) * 0.0004;
+
+        coords.push({
+          lat: round6(lat + curve),
+          lon: round6(lon - curve)
+        });
+      }
+
+      return coords;
+    }
+
+    function drawRoute(color) {
+      if (!routeCoords || routeCoords.length === 0) return;
+
+      if (routeLine) map.removeLayer(routeLine);
+
+      const leafletCoords = routeCoords.map(p => [p.lat, p.lon]);
+      routeLine = L.polyline(leafletCoords, {
+        color: color || "blue",
+        weight: 5
+      }).addTo(map);
+
+      map.fitBounds(routeLine.getBounds());
+    }
+
+    function ensureRoute() {
+      if (routeCoords.length > 0) return true;
+
+      if (startMarker && endMarker) {
+        const s = startMarker.getLatLng();
+        const e = endMarker.getLatLng();
+
+        routeCoords = generateSimpleRoute(s, e, 50);
+        routeCumulative = computeCumulativeDistances(routeCoords);
+
+        drawRoute("green");
+
+        log("No server route available. Generated fallback route.");
+        return true;
+      }
+
+      return false;
+    }
+
+    function getLookaheadPoints(index, maxPoints = 8, distanceAhead = 250) {
+      if (!routeCoords || routeCoords.length === 0) return [];
+
+      if (!routeCumulative || routeCumulative.length === 0) {
+        routeCumulative = computeCumulativeDistances(routeCoords);
+      }
+
+      const startIdx = clamp(index, 0, routeCoords.length - 1);
+      const startDist = routeCumulative[startIdx] || 0;
+      const totalDist = routeCumulative[routeCumulative.length - 1] || 0;
+
+      const targetDist = Math.min(totalDist, startDist + distanceAhead);
+
+      let endIdx = startIdx;
+
+      while (
+        endIdx + 1 < routeCoords.length &&
+        routeCumulative[endIdx + 1] < targetDist
+      ) {
+        endIdx++;
+      }
+
+      const candidates = [];
+
+      for (let i = startIdx; i <= endIdx; i++) {
+        candidates.push(routeCoords[i]);
+      }
+
+      if (candidates.length <= maxPoints) {
+        return candidates.map(p => [round6(p.lat), round6(p.lon)]);
+      }
+
+      const sampled = [];
+
+      for (let i = 0; i < maxPoints; i++) {
+        const t = i / (maxPoints - 1);
+        const idx = Math.round(t * (candidates.length - 1));
+        sampled.push(candidates[idx]);
+      }
+
+      const unique = [];
+
+      for (const p of sampled) {
+        if (
+          unique.length === 0 ||
+          unique[unique.length - 1][0] !== round6(p.lat) ||
+          unique[unique.length - 1][1] !== round6(p.lon)
+        ) {
+          unique.push([round6(p.lat), round6(p.lon)]);
         }
-
-        const coords = data.routes[0].geometry.coordinates;
-
-        routeCoords = coords.map(c => ({
-          lat: c[1],
-          lon: c[0]
-        }));
-
-        log(`Route loaded: ${routeCoords.length} points`);
-        log(`Distance: ${(data.routes[0].distance / 1000).toFixed(2)} km`);
-
-        if (routeLine) map.removeLayer(routeLine);
-
-        const leafletCoords = routeCoords.map(p => [p.lat, p.lon]);
-        routeLine = L.polyline(leafletCoords, { color: "blue" }).addTo(map);
-
-        map.fitBounds(routeLine.getBounds());
-
-        simIndex = 0;
-      } catch (err) {
-        log("Route fetch error: " + err.message);
-        alert("Could not fetch route: " + err.message);
       }
-    });
 
-    // ----------------------------------------------------------
-    // Build packet
-    // ----------------------------------------------------------
+      return unique;
+    }
+
+    function estimateDistanceToTurn(index) {
+      if (!routeCoords || routeCoords.length < 3) return 100;
+
+      if (!routeCumulative || routeCumulative.length === 0) {
+        routeCumulative = computeCumulativeDistances(routeCoords);
+      }
+
+      let cumulative = 0;
+
+      for (let i = index; i < routeCoords.length - 2; i++) {
+        cumulative += haversineDistance(routeCoords[i], routeCoords[i + 1]);
+
+        const b1 = bearing(routeCoords[i], routeCoords[i + 1]);
+        const b2 = bearing(routeCoords[i + 1], routeCoords[i + 2]);
+
+        const diff = angleDiff(b1, b2);
+
+        if (Math.abs(diff) > 30) {
+          return Math.max(20, Math.round(cumulative));
+        }
+      }
+
+      const remaining =
+        routeCumulative[routeCumulative.length - 1] - routeCumulative[index];
+
+      return Math.max(20, Math.round(remaining || 100));
+    }
+
+    function estimateTurnType(index) {
+      if (!routeCoords || routeCoords.length < 3) return 0;
+
+      for (let i = index; i < routeCoords.length - 2; i++) {
+        const b1 = bearing(routeCoords[i], routeCoords[i + 1]);
+        const b2 = bearing(routeCoords[i + 1], routeCoords[i + 2]);
+
+        const diff = angleDiff(b1, b2);
+
+        if (diff < -150 || diff > 150) return 5;
+        if (diff < -30) return 1;
+        if (diff > 30) return 2;
+      }
+
+      return 0;
+    }
+
     function buildPacket(index, manual) {
-      if (routeCoords.length === 0) {
-        // Fallback fake route if no OSRM route loaded
+      if (!ensureRoute()) {
         const center = map.getCenter();
 
         const rider = {
@@ -478,13 +625,16 @@
         const pts = [];
 
         for (let i = 0; i < 6; i++) {
-          pts.push([rider.lat + i * 0.0001, rider.lon + i * 0.0001]);
+          pts.push([
+            round6(rider.lat + i * 0.00015),
+            round6(rider.lon + i * 0.00015)
+          ]);
         }
 
         return {
-          lat: rider.lat,
-          lon: rider.lon,
-          hdg: manual ? 0 : 45,
+          lat: round6(rider.lat),
+          lon: round6(rider.lon),
+          hdg: 45,
           spd: manual
             ? parseFloat(document.getElementById("speedInput").value || 18)
             : 18,
@@ -495,13 +645,13 @@
             ? parseInt(document.getElementById("turnInput").value || 0)
             : 0,
           road: manual
-            ? document.getElementById("roadInput").value || "Test Road"
+            ? sanitizeRoad(document.getElementById("roadInput").value)
             : "Fake Route",
           pts: pts
         };
       }
 
-      const safeIndex = Math.max(0, Math.min(index, routeCoords.length - 1));
+      const safeIndex = clamp(index, 0, routeCoords.length - 1);
       const rider = routeCoords[safeIndex];
 
       const nextIndex = Math.min(safeIndex + 1, routeCoords.length - 1);
@@ -509,63 +659,30 @@
 
       const hdg = bearing(rider, next);
 
-      const pts = [];
+      const pts = getLookaheadPoints(safeIndex, 8, 250);
 
-      for (let i = safeIndex; i < Math.min(safeIndex + 6, routeCoords.length); i++) {
-        pts.push([routeCoords[i].lat, routeCoords[i].lon]);
-      }
-
-      let dist = 100;
+      let dist = 150;
       let turn = 0;
       let spd = 18;
-      let road = "OSRM Route";
+      let road = "Route";
 
       if (manual) {
         dist = parseInt(document.getElementById("distInput").value || 150);
         turn = parseInt(document.getElementById("turnInput").value || 0);
         spd = parseFloat(document.getElementById("speedInput").value || 18);
-        road = document.getElementById("roadInput").value || "Road";
+        road = sanitizeRoad(document.getElementById("roadInput").value);
       } else {
-        // Estimate distance to next turn and turn direction
-        let cumulative = 0;
-        turn = 0;
-
-        for (let i = safeIndex; i < routeCoords.length - 1; i++) {
-          cumulative += haversineDistance(routeCoords[i], routeCoords[i + 1]);
-
-          if (i + 2 < routeCoords.length) {
-            const b1 = bearing(routeCoords[i], routeCoords[i + 1]);
-            const b2 = bearing(routeCoords[i + 1], routeCoords[i + 2]);
-
-            const diff = angleDiff(b1, b2);
-
-            if (Math.abs(diff) > 25) {
-              dist = Math.max(20, Math.round(cumulative));
-
-              if (diff < 0) {
-                turn = 1; // left
-              } else {
-                turn = 2; // right
-              }
-
-              break;
-            }
-          }
-        }
-
-        if (!dist || dist <= 0) {
-          dist = Math.max(20, Math.round(cumulative));
-        }
-
+        dist = estimateDistanceToTurn(safeIndex);
+        turn = estimateTurnType(safeIndex);
         spd = 18;
         road = "OSRM Route";
       }
 
       return {
-        lat: rider.lat,
-        lon: rider.lon,
-        hdg: hdg,
-        spd: spd,
+        lat: round6(rider.lat),
+        lon: round6(rider.lon),
+        hdg: Math.round(hdg * 10) / 10,
+        spd: Math.round(spd * 10) / 10,
         dist: dist,
         turn: turn,
         road: road,
@@ -573,9 +690,107 @@
       };
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // Fetch route from OSRM with fallback
+    // ------------------------------------------------------------
+    btnFetchRoute.addEventListener("click", async () => {
+      if (!startMarker || !endMarker) {
+        alert("Set START and END on the map first.");
+        return;
+      }
+
+      const s = startMarker.getLatLng();
+      const e = endMarker.getLatLng();
+
+      const startPoint = { lat: s.lat, lon: s.lng };
+      const endPoint = { lat: e.lat, lon: e.lng };
+
+      const straightDistance = haversineDistance(startPoint, endPoint);
+
+      log("Fetching route...");
+      log(`Straight-line distance: ${(straightDistance / 1000).toFixed(2)} km`);
+
+      const urls = [
+        `https://routing.openstreetmap.de/routed-bike/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
+        `https://routing.openstreetmap.de/routed-bike/route/v1/bike/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
+        `https://router.project-osrm.org/route/v1/bicycle/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
+        `https://router.project-osrm.org/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`
+      ];
+
+      let routeData = null;
+      let lastError = null;
+
+      for (const url of urls) {
+        try {
+          log("Trying route server...");
+
+          const res = await fetch(url, {
+            headers: {
+              Accept: "application/json"
+            },
+            cache: "no-store"
+          });
+
+          if (!res.ok) {
+            lastError = new Error(`HTTP ${res.status}: ${res.statusText}`);
+            log("Failed: " + lastError.message);
+            continue;
+          }
+
+          const data = await res.json();
+
+          if (data.code === "Ok" && data.routes && data.routes.length > 0) {
+            routeData = data;
+            log("Route server responded successfully.");
+            break;
+          } else {
+            lastError = new Error(data.message || "Route response not Ok");
+            log("Failed: " + lastError.message);
+          }
+        } catch (err) {
+          lastError = err;
+          log("Fetch error: " + err.message);
+        }
+      }
+
+      if (routeData) {
+        const coords = routeData.routes[0].geometry.coordinates;
+
+        routeCoords = coords.map(c => ({
+          lat: round6(c[1]),
+          lon: round6(c[0])
+        }));
+
+        const routeDistance = routeData.routes[0].distance;
+
+        log(`Real route loaded: ${routeCoords.length} points`);
+        log(`Route distance: ${(routeDistance / 1000).toFixed(2)} km`);
+
+        if (routeDistance > straightDistance * 4 && routeDistance > 2000) {
+          log("Route looks unrealistically long. Using fallback route.");
+
+          routeCoords = generateSimpleRoute(s, e, 50);
+          drawRoute("green");
+        } else {
+          drawRoute("blue");
+        }
+      } else {
+        log("All routing servers failed. Using fallback route.");
+
+        routeCoords = generateSimpleRoute(s, e, 50);
+        drawRoute("green");
+      }
+
+      routeCumulative = computeCumulativeDistances(routeCoords);
+
+      simIndex = 0;
+
+      log(`Route stored. Total points: ${routeCoords.length}`);
+    });
+
+    // ------------------------------------------------------------
     // Send once
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     btnSendOnce.addEventListener("click", async () => {
       if (!characteristic || !server || !server.connected) {
         alert("Connect to ESP32 first.");
@@ -586,18 +801,24 @@
         const packet = buildPacket(0, true);
         const json = JSON.stringify(packet);
 
+        log(`Sending route start packet...`);
+        log(`Points in packet: ${packet.pts.length}`);
+
         await sendJsonString(json);
 
-        log(`Manual send: dist=${packet.dist}, turn=${packet.turn}`);
+        log(
+          `Manual send success: dist=${packet.dist}, ` +
+          `turn=${packet.turn}, pts=${packet.pts.length}`
+        );
       } catch (err) {
         log("Send error: " + err.message);
         alert("Send failed: " + err.message);
       }
     });
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // Simulate ride
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     function stopSimulation() {
       if (simTimer) {
         clearInterval(simTimer);
@@ -614,8 +835,8 @@
         return;
       }
 
-      if (routeCoords.length === 0) {
-        alert("Fetch a route first.");
+      if (!ensureRoute()) {
+        alert("Set START and END on the map first, then fetch route.");
         return;
       }
 
@@ -642,7 +863,7 @@
 
           log(
             `Simulate: idx=${simIndex}, dist=${packet.dist}, ` +
-            `turn=${packet.turn}, hdg=${packet.hdg.toFixed(0)}`
+            `turn=${packet.turn}, hdg=${packet.hdg}, pts=${packet.pts.length}`
           );
 
           simIndex++;
