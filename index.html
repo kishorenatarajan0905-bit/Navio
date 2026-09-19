@@ -4,6 +4,23 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bike Nav ESP32 Controller</title>
+  <!--
+    ============================================================================
+    BIKE NAV ESP32 CONTROLLER  —  complete single-file build
+    ----------------------------------------------------------------------------
+    PAIR WITH : ESP32 firmware "50Hz / 16MHz / no-blank" (route-once protocol).
+    PROTOCOL  : t:"R" = full route (sent ONCE, <=48 pts, bbox-preserving)
+                t:"U" = light scalar update (lat,lon,hdg,spd,dist,turn,road)
+    FEATURES  : Leaflet map + style picker (Esri default / Google / OSM / CARTO
+                with API-key box to remove watermark), OSRM routing with 4-server
+                fallback + generated fallback, real road names from route steps,
+                manual-override checkbox (testing only), measured-speed simulator
+                (slows into bends, no speed spike on loop), ASCII-safe BLE chunks.
+    RUN       : serve over http(s). Do NOT open via file:/// .
+                python -m http.server 8000   ->  http://localhost:8000/<this>.html
+                For phone BLE use Chrome/Edge on Android (iOS Safari has no Web BT).
+    ============================================================================
+  -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body{font-family:Arial,sans-serif;margin:0;padding:12px;background:#f3f4f6;}
@@ -75,15 +92,18 @@
     <div id="logs">Ready...</div>
   </div>
 
-  <script src="https://unpkg.com/leaflet/1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
+    /* ============================ STATE ============================ */
     const SERVICE_UUID="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
     const CHARACTERISTIC_UUID="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
     let device=null,server=null,characteristic=null;
     let startMarker=null,endMarker=null,routeLine=null;
     let routeCoords=[],routeCumulative=[];
     let simTimer=null,simIndex=0,sending=false;
     let simDistM=0,simLastTs=0,simSpdSmooth=0,routeSent=false;
+    let tileLayer=null;
 
     const statusDiv=document.getElementById("status"),logDiv=document.getElementById("logs");
     const btnConnect=document.getElementById("btnConnect"),btnDisconnect=document.getElementById("btnDisconnect");
@@ -91,9 +111,9 @@
 
     if(!navigator.bluetooth){alert("Web Bluetooth not supported. Use Chrome/Edge on Android or desktop.");btnConnect.disabled=true;}
 
-    // ---- map + style switcher ----
+    /* ============================ MAP + STYLE ============================ */
     const map=L.map("map").setView([12.9716,77.5946],14);
-    let tileLayer=null;
+
     function styleConfig(style,key){
       if(style==="google")return{url:"https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",opts:{subdomains:["mt0","mt1","mt2","mt3"],maxZoom:20,attribution:"Map data &copy; Google — demo only"}};
       if(style==="osm")return{url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png",opts:{maxZoom:19,attribution:"&copy; OpenStreetMap contributors"}};
@@ -120,55 +140,164 @@
       else if(!endMarker){endMarker=L.marker(e.latlng).addTo(map).bindPopup("END");log("End point set. Fetch route now.");}
       else{resetRoute();startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Reset. New start point set.");}
     });
-    function resetRoute(){if(startMarker)map.removeLayer(startMarker);if(endMarker)map.removeLayer(endMarker);if(routeLine)map.removeLayer(routeLine);startMarker=endMarker=routeLine=null;routeCoords=[];routeCumulative=[];routeSent=false;stopSimulation();}
+    function resetRoute(){
+      if(startMarker)map.removeLayer(startMarker);
+      if(endMarker)map.removeLayer(endMarker);
+      if(routeLine)map.removeLayer(routeLine);
+      startMarker=endMarker=routeLine=null;
+      routeCoords=[];routeCumulative=[];routeSent=false;
+      stopSimulation();
+    }
 
+    /* ============================ LOG / STATUS ============================ */
     function log(m){const t=new Date().toLocaleTimeString();logDiv.innerHTML+=`[${t}] ${m}<br>`;logDiv.scrollTop=logDiv.scrollHeight;}
     function setStatus(t,c){statusDiv.innerText=t;statusDiv.style.color=c?"#16a34a":"#dc2626";}
 
-    // ---- BLE connect ----
-    btnConnect.addEventListener("click",async()=>{try{log("Requesting device...");device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});log(`Connecting to ${device.name||"?"}...`);server=await device.gatt.connect();const s=await server.getPrimaryService(SERVICE_UUID);characteristic=await s.getCharacteristic(CHARACTERISTIC_UUID);setStatus("CONNECTED",true);btnConnect.style.display="none";btnDisconnect.style.display="block";routeSent=false;log("BLE connected.");}catch(e){log("BLE fail: "+e.message);alert("Connection failed: "+e.message);}});
-    btnDisconnect.addEventListener("click",()=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect();setStatus("DISCONNECTED",false);btnConnect.style.display="block";btnDisconnect.style.display="none";stopSimulation();log("Disconnected.");});
+    /* ============================ BLE CONNECT ============================ */
+    btnConnect.addEventListener("click",async()=>{
+      try{
+        log("Requesting device...");
+        device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});
+        log(`Connecting to ${device.name||"?"}...`);
+        server=await device.gatt.connect();
+        const s=await server.getPrimaryService(SERVICE_UUID);
+        characteristic=await s.getCharacteristic(CHARACTERISTIC_UUID);
+        setStatus("CONNECTED",true);
+        btnConnect.style.display="none";btnDisconnect.style.display="block";
+        routeSent=false;
+        log("BLE connected.");
+      }catch(e){log("BLE fail: "+e.message);alert("Connection failed: "+e.message);}
+    });
+    btnDisconnect.addEventListener("click",()=>{
+      if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect();
+      setStatus("DISCONNECTED",false);
+      btnConnect.style.display="block";btnDisconnect.style.display="none";
+      stopSimulation();log("Disconnected.");
+    });
 
-    // ---- ASCII-safe chunk writer ----
+    /* ============================ ASCII-SAFE CHUNK WRITER ============================ */
     function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
     function asciiOnly(t){return String(t).replace(/[^\x20-\x7E]/g,"");}
     function hex2(n){return n.toString(16).padStart(2,"0").toUpperCase();}
-    async function writePacket(p){if(characteristic.properties&&characteristic.properties.writeWithoutResponse)await characteristic.writeValueWithoutResponse(p);else await characteristic.writeValue(p);}
-    async function sendJsonString(js){if(!characteristic||!server||!server.connected)throw new Error("Not connected");const a=asciiOnly(js),b=new TextEncoder().encode(a),MAX=17;let off=0,seq=0;while(off<b.length){const cl=Math.min(MAX,b.length-off),end=off+cl>=b.length?"1":"0",hdr=hex2(seq)+end,txt=a.slice(off,off+cl),pk=new TextEncoder().encode(hdr+txt);await writePacket(pk);off+=cl;seq++;if(seq>255)throw new Error("packet too large");await sleep(8);}log(`sent ${b.length} B`);}
+    async function writePacket(p){
+      if(characteristic.properties&&characteristic.properties.writeWithoutResponse)await characteristic.writeValueWithoutResponse(p);
+      else await characteristic.writeValue(p);
+    }
+    async function sendJsonString(js){
+      if(!characteristic||!server||!server.connected)throw new Error("Not connected");
+      const a=asciiOnly(js),b=new TextEncoder().encode(a),MAX=17;
+      let off=0,seq=0;
+      while(off<b.length){
+        const cl=Math.min(MAX,b.length-off),end=off+cl>=b.length?"1":"0";
+        const hdr=hex2(seq)+end,txt=a.slice(off,off+cl),pk=new TextEncoder().encode(hdr+txt);
+        await writePacket(pk);
+        off+=cl;seq++;
+        if(seq>255)throw new Error("packet too large");
+        await sleep(8);
+      }
+      log(`sent ${b.length} B`);
+    }
 
-    // ---- geo helpers ----
-    function toRad(d){return d*Math.PI/180;} function toDeg(r){return r*180/Math.PI;}
-    function round6(v){return Math.round(v*1e6)/1e6;} function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+    /* ============================ GEO HELPERS ============================ */
+    function toRad(d){return d*Math.PI/180;}
+    function toDeg(r){return r*180/Math.PI;}
+    function round6(v){return Math.round(v*1e6)/1e6;}
+    function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
     function haversine(p1,p2){const R=6371000,dLa=toRad(p2.lat-p1.lat),dLo=toRad(p2.lon-p1.lon);const a=Math.sin(dLa/2)**2+Math.cos(toRad(p1.lat))*Math.cos(toRad(p2.lat))*Math.sin(dLo/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
     function bearing(p1,p2){const f1=toRad(p1.lat),f2=toRad(p2.lat),dl=toRad(p2.lon-p1.lon);const y=Math.sin(dl)*Math.cos(f2),x=Math.cos(f1)*Math.sin(f2)-Math.sin(f1)*Math.cos(f2)*Math.cos(dl);return (toDeg(Math.atan2(y,x))+360)%360;}
     function angleDiff(a,b){return ((b-a+540)%360)-180;}
     function sanitizeRoad(t){return String(t||"").replace(/[^A-Za-z0-9 .,_-]/g,"").substring(0,20).trim()||"Route";}
 
-    // ---- route helpers ----
+    /* ============================ ROUTE HELPERS ============================ */
     function computeCum(c){const a=[0];for(let i=1;i<c.length;i++)a.push(a[i-1]+haversine(c[i-1],c[i]));return a;}
     function generateSimpleRoute(s,e,steps=50){const o=[];for(let i=0;i<=steps;i++){const t=i/steps,la=s.lat+(e.lat-s.lat)*t,lo=s.lng+(e.lng-s.lng)*t,cv=Math.sin(t*Math.PI)*0.0004;o.push({lat:round6(la+cv),lon:round6(lo-cv),name:"Route"});}return o;}
     function dedupe(p){const o=[];for(const q of p){const l=o[o.length-1];if(!l||l.lat!==q.lat||l.lon!==q.lon)o.push(q);}return o;}
     function drawRoute(col){if(!routeCoords.length)return;if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col||"blue",weight:5}).addTo(map);map.fitBounds(routeLine.getBounds());}
-    function ensureRoute(){if(routeCoords.length){if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);return true;}if(startMarker&&endMarker){const s=startMarker.getLatLng(),e=endMarker.getLatLng();routeCoords=generateSimpleRoute(s,e,50);routeCumulative=computeCum(routeCoords);drawRoute("green");log("Fallback route generated.");return true;}return false;}
-    function downsample(c,maxN){if(c.length<=maxN)return c.slice();const o=[];for(let i=0;i<maxN;i++){const t=i/(maxN-1);o.push(c[Math.round(t*(c.length-1))]);}o[maxN-1]=c[c.length-1];return o;}
-    function plannedSpeedKmh(i){if(routeCoords.length<3)return 18;let sh=0;for(let k=i;k<Math.min(i+6,routeCoords.length-2);k++){const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>25){sh=Math.min(1,(d-25)/60);break;}}return Math.round((22-(22-9)*sh)*10)/10;}
-    function estimateDistanceToTurn(i){if(routeCoords.length<3)return 100;if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);let cum=0;for(let k=i;k<routeCoords.length-2;k++){cum+=haversine(routeCoords[k],routeCoords[k+1]);const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>30)return Math.max(20,Math.round(cum));}return Math.max(20,Math.round((routeCumulative[routeCumulative.length-1]-routeCumulative[i])||100));}
-    function estimateTurnType(i){if(routeCoords.length<3)return 0;for(let k=i;k<routeCoords.length-2;k++){const d=angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2]));if(d<-150||d>150)return 5;if(d<-30)return 1;if(d>30)return 2;}return 0;}
+    function ensureRoute(){
+      if(routeCoords.length){if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);return true;}
+      if(startMarker&&endMarker){const s=startMarker.getLatLng(),e=endMarker.getLatLng();routeCoords=generateSimpleRoute(s,e,50);routeCumulative=computeCum(routeCoords);drawRoute("green");log("Fallback route generated.");return true;}
+      return false;
+    }
+    /* bounding-box-preserving downsample: always keeps the 4 extreme vertices
+       (min/max lat, min/max lon) + endpoints, so the rider dot (a real route
+       vertex) can never project outside the ESP32 map area. */
+    function downsample(c,maxN){
+      const n=c.length; if(n<=maxN) return c.slice();
+      const req=new Set([0,n-1]);
+      let iMinLa=0,iMaxLa=0,iMinLo=0,iMaxLo=0;
+      for(let i=1;i<n;i++){
+        if(c[i].lat<c[iMinLa].lat)iMinLa=i; if(c[i].lat>c[iMaxLa].lat)iMaxLa=i;
+        if(c[i].lon<c[iMinLo].lon)iMinLo=i; if(c[i].lon>c[iMaxLo].lon)iMaxLo=i;
+      }
+      req.add(iMinLa);req.add(iMaxLa);req.add(iMinLo);req.add(iMaxLo);
+      const extra=Math.max(1,maxN-req.size), idx=[...req];
+      for(let k=0;k<extra;k++) idx.push(Math.round(k*(n-1)/(extra-1||1)));
+      const uniq=[...new Set(idx)].sort((a,b)=>a-b);
+      return uniq.map(i=>c[i]);
+    }
+    function plannedSpeedKmh(i){
+      if(routeCoords.length<3)return 18;
+      let sh=0;
+      for(let k=i;k<Math.min(i+6,routeCoords.length-2);k++){
+        const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));
+        if(d>25){sh=Math.min(1,(d-25)/60);break;}
+      }
+      return Math.round((22-(22-9)*sh)*10)/10;   // cruise 22, crawl 9 into bends
+    }
+    function estimateDistanceToTurn(i){
+      if(routeCoords.length<3)return 100;
+      if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);
+      let cum=0;
+      for(let k=i;k<routeCoords.length-2;k++){
+        cum+=haversine(routeCoords[k],routeCoords[k+1]);
+        const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));
+        if(d>30)return Math.max(20,Math.round(cum));
+      }
+      return Math.max(20,Math.round((routeCumulative[routeCumulative.length-1]-routeCumulative[i])||100));
+    }
+    function estimateTurnType(i){
+      if(routeCoords.length<3)return 0;
+      for(let k=i;k<routeCoords.length-2;k++){
+        const d=angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2]));
+        if(d<-150||d>150)return 5; if(d<-30)return 1; if(d>30)return 2;
+      }
+      return 0;
+    }
 
-    // ---- packet builders (route-once + light-update protocol) ----
+    /* ============================ PACKET BUILDERS (route-once protocol) ============================ */
     function buildRoutePacket(){const ds=downsample(routeCoords,48);return {t:"R",pts:ds.map(p=>[round6(p.lat),round6(p.lon)])};}
     function buildUpdatePacket(index,manual,spdMeasured){
       const ov=document.getElementById("manualOverride").checked, em=manual&&ov;
-      if(!ensureRoute()){const c=map.getCenter();return {t:"U",lat:round6(c.lat),lon:round6(c.lng),hdg:45,spd:em?parseFloat(document.getElementById("speedInput").value||18):(spdMeasured!=null?spdMeasured:18),dist:em?parseInt(document.getElementById("distInput").value||150):150,turn:em?parseInt(document.getElementById("turnInput").value||0):0,road:em?sanitizeRoad(document.getElementById("roadInput").value):"Fake Route"};}
+      if(!ensureRoute()){
+        const c=map.getCenter();
+        return {t:"U",lat:round6(c.lat),lon:round6(c.lng),hdg:45,
+          spd:em?parseFloat(document.getElementById("speedInput").value||18):(spdMeasured!=null?spdMeasured:18),
+          dist:em?parseInt(document.getElementById("distInput").value||150):150,
+          turn:em?parseInt(document.getElementById("turnInput").value||0):0,
+          road:em?sanitizeRoad(document.getElementById("roadInput").value):"Fake Route"};
+      }
       const si=clamp(index,0,routeCoords.length-1),r=routeCoords[si],nx=routeCoords[Math.min(si+1,routeCoords.length-1)],hdg=bearing(r,nx);
       let dist,turn,spd,road;
-      if(em){dist=parseInt(document.getElementById("distInput").value||150);turn=parseInt(document.getElementById("turnInput").value||0);spd=parseFloat(document.getElementById("speedInput").value||18);road=sanitizeRoad(document.getElementById("roadInput").value);}
-      else{dist=estimateDistanceToTurn(si);turn=estimateTurnType(si);spd=(spdMeasured!=null)?spdMeasured:plannedSpeedKmh(si);road=sanitizeRoad(r.name||"Route");}
+      if(em){
+        dist=parseInt(document.getElementById("distInput").value||150);
+        turn=parseInt(document.getElementById("turnInput").value||0);
+        spd=parseFloat(document.getElementById("speedInput").value||18);
+        road=sanitizeRoad(document.getElementById("roadInput").value);
+      }else{
+        dist=estimateDistanceToTurn(si);
+        turn=estimateTurnType(si);
+        spd=(spdMeasured!=null)?spdMeasured:plannedSpeedKmh(si);
+        road=sanitizeRoad(r.name||"Route");
+      }
       return {t:"U",lat:round6(r.lat),lon:round6(r.lon),hdg:Math.round(hdg*10)/10,spd:Math.round(spd*10)/10,dist,turn,road};
     }
-    async function sendRouteOnce(){if(!characteristic||!server||!server.connected){log("Not connected — route will send on next Connect+Fetch.");return false;}await sendJsonString(JSON.stringify(buildRoutePacket()));routeSent=true;log("ROUTE (full path) sent to ESP32.");return true;}
+    async function sendRouteOnce(){
+      if(!characteristic||!server||!server.connected){log("Not connected — route will send on next Connect+Fetch.");return false;}
+      await sendJsonString(JSON.stringify(buildRoutePacket()));
+      routeSent=true;log("ROUTE (full path) sent to ESP32.");return true;
+    }
 
-    // ---- fetch route ----
+    /* ============================ FETCH ROUTE ============================ */
     btnFetchRoute.addEventListener("click",async()=>{
       if(!startMarker||!endMarker){alert("Set START and END first.");return;}
       const s=startMarker.getLatLng(),e=endMarker.getLatLng(),sp={lat:s.lat,lon:s.lng},ep={lat:e.lat,lon:e.lng},straight=haversine(sp,ep);
@@ -180,21 +309,53 @@
         `https://router.project-osrm.org/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`
       ];
       let rd=null,le=null;
-      for(const u of urls){try{log("Trying route server...");const res=await fetch(u,{headers:{Accept:"application/json"},cache:"no-store"});if(!res.ok){le=new Error(`HTTP ${res.status}`);log("Failed: "+le.message);continue;}const d=await res.json();if(d.code==="Ok"&&d.routes&&d.routes.length){rd=d;log("Route server OK.");break;}le=new Error(d.message||"not Ok");log("Failed: "+le.message);}catch(err){le=err;log("Fetch error: "+err.message);}}
-      if(rd){const steps=(rd.routes[0].legs&&rd.routes[0].legs[0]&&rd.routes[0].legs[0].steps)||[];routeCoords=[];let ln="";for(const st of steps){const nm=(st.name&&st.name.trim())?st.name.trim():"";if(nm)ln=nm;const gm=(st.geometry&&st.geometry.coordinates)?st.geometry.coordinates:[];for(const c of gm)routeCoords.push({lat:round6(c[1]),lon:round6(c[0]),name:nm||ln||"Route"});}routeCoords=dedupe(routeCoords);if(!routeCoords.length)routeCoords=rd.routes[0].geometry.coordinates.map(c=>({lat:round6(c[1]),lon:round6(c[0]),name:"Route"}));const rdist=rd.routes[0].distance;log(`Real route: ${routeCoords.length} pts, ${(rdist/1000).toFixed(2)} km`);if(rdist>straight*4&&rdist>2000){log("Route unrealistically long -> fallback.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}else drawRoute("blue");}
-      else{log("All servers failed -> fallback route.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}
+      for(const u of urls){
+        try{
+          log("Trying route server...");
+          const res=await fetch(u,{headers:{Accept:"application/json"},cache:"no-store"});
+          if(!res.ok){le=new Error(`HTTP ${res.status}`);log("Failed: "+le.message);continue;}
+          const d=await res.json();
+          if(d.code==="Ok"&&d.routes&&d.routes.length){rd=d;log("Route server OK.");break;}
+          le=new Error(d.message||"not Ok");log("Failed: "+le.message);
+        }catch(err){le=err;log("Fetch error: "+err.message);}
+      }
+      if(rd){
+        const steps=(rd.routes[0].legs&&rd.routes[0].legs[0]&&rd.routes[0].legs[0].steps)||[];
+        routeCoords=[];let ln="";
+        for(const st of steps){
+          const nm=(st.name&&st.name.trim())?st.name.trim():""; if(nm)ln=nm;
+          const gm=(st.geometry&&st.geometry.coordinates)?st.geometry.coordinates:[];
+          for(const c of gm)routeCoords.push({lat:round6(c[1]),lon:round6(c[0]),name:nm||ln||"Route"});
+        }
+        routeCoords=dedupe(routeCoords);
+        if(!routeCoords.length)routeCoords=rd.routes[0].geometry.coordinates.map(c=>({lat:round6(c[1]),lon:round6(c[0]),name:"Route"}));
+        const rdist=rd.routes[0].distance;
+        log(`Real route: ${routeCoords.length} pts, ${(rdist/1000).toFixed(2)} km`);
+        if(rdist>straight*4&&rdist>2000){log("Route unrealistically long -> fallback.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}
+        else drawRoute("blue");
+      }else{
+        log("All servers failed -> fallback route.");
+        routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");
+      }
       routeCumulative=computeCum(routeCoords);simIndex=0;routeSent=false;
       log(`Route stored: ${routeCoords.length} pts`);
       if(characteristic&&server&&server.connected)await sendRouteOnce();
     });
 
-    // ---- send once ----
+    /* ============================ SEND ONCE ============================ */
     btnSendOnce.addEventListener("click",async()=>{
       if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
-      try{if(!routeSent)await sendRouteOnce();await sleep(60);const u=buildUpdatePacket(0,true);await sendJsonString(JSON.stringify(u));log(`UPDATE sent: dist=${u.dist} turn=${u.turn} road="${u.road}" spd=${u.spd}`);}catch(e){log("Send error: "+e.message);alert("Send failed: "+e.message);}
+      try{
+        if(!routeSent)await sendRouteOnce();
+        await sleep(60);
+        const u=buildUpdatePacket(0,true);
+        await sendJsonString(JSON.stringify(u));
+        const usingOv=document.getElementById("manualOverride").checked;
+        log(`${usingOv?"UPDATE (override)":"UPDATE (route)"}: dist=${u.dist} turn=${u.turn} road="${u.road}" spd=${u.spd}`);
+      }catch(e){log("Send error: "+e.message);alert("Send failed: "+e.message);}
     });
 
-    // ---- simulate (route once, then light updates, measured speed) ----
+    /* ============================ SIMULATE (measured speed, no loop spike) ============================ */
     function stopSimulation(){if(simTimer){clearInterval(simTimer);simTimer=null;}btnSimulate.innerText="4. Simulate Ride";log("Simulation stopped.");}
     btnSimulate.addEventListener("click",async()=>{
       if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
@@ -205,15 +366,26 @@
       btnSimulate.innerText="Stop Simulation";log("Simulation started (measured speed).");
       simTimer=setInterval(async()=>{
         if(sending)return;sending=true;
-        try{const now=performance.now();let dt=(now-simLastTs)/1000;simLastTs=now;dt=clamp(dt,0.05,0.6);
+        try{
+          const now=performance.now();let dt=(now-simLastTs)/1000;simLastTs=now;dt=clamp(dt,0.05,0.6);
           const total=routeCumulative[routeCumulative.length-1]||1, tgt=plannedSpeedKmh(simIndex)/3.6;
-          let nd=simDistM+tgt*dt; if(nd>=total){nd=0;simIndex=0;}
-          let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;
-          const measured=(Math.abs(nd-simDistM)/dt)*3.6; simSpdSmooth+=(measured-simSpdSmooth)*0.3; simDistM=nd; simIndex=ni;
-          const u=buildUpdatePacket(simIndex,false,simSpdSmooth); await sendJsonString(JSON.stringify(u));
+          const ndRaw=simDistM+tgt*dt;
+          let nd,measured;
+          if(ndRaw>=total){                 // loop wrap: snap speed to planned, no spike
+            nd=0;simIndex=0;measured=tgt*3.6;simSpdSmooth=measured;
+          }else{
+            nd=ndRaw;
+            let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;
+            measured=(Math.abs(nd-simDistM)/dt)*3.6;
+            simSpdSmooth+=(measured-simSpdSmooth)*0.3;
+            simIndex=ni;
+          }
+          simDistM=nd;
+          const u=buildUpdatePacket(simIndex,false,simSpdSmooth);
+          await sendJsonString(JSON.stringify(u));
           log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);
         }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
-      },400);   // lower to 200 for more frequent glide targets if you want
+      },400);   // 2.5 Hz target stream; firmware interpolates to 50 Hz. Lower to 200 for snappier glide.
     });
   </script>
 </body>
