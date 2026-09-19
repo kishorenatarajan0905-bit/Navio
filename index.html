@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bike Nav ESP32 Controller</title>
+  <title>Route Navigator - ESP32 BLE Controller</title>
 
   <link
     rel="stylesheet"
@@ -111,7 +111,7 @@
 
 <body>
   <div class="container">
-    <h2>Bike Nav ESP32 Controller</h2>
+    <h2>🗺️ Route Navigator to ESP32</h2>
     <div id="status">Disconnected</div>
 
     <!-- Map style picker -->
@@ -138,11 +138,12 @@
     <button id="btnDisconnect">Disconnect</button>
 
     <div class="panel">
-      <strong>Map Instructions</strong>
+      <strong>Location & Route Instructions</strong>
       <div class="hint">
-        Click map once for START.<br />
-        Click map again for END.<br />
-        Click again to reset.<br /><br />
+        <button id="btnGetLocation" style="width:auto; padding:8px 16px; margin:4px 0; background:#0891b2;">📍 Use My Current Location as Start</button><br />
+        Or click map to manually set START point.<br />
+        Click again to set END point.<br />
+        Click once more to reset.<br /><br />
         For best route results, click directly on visible roads.
       </div>
     </div>
@@ -322,6 +323,52 @@
     document.getElementById("cartoKey").addEventListener("change", applyMapStyle);
 
     applyMapStyle();
+
+    // ------------------------------------------------------------
+    // Get user's current location
+    // ------------------------------------------------------------
+    const btnGetLocation = document.getElementById("btnGetLocation");
+
+    btnGetLocation.addEventListener("click", () => {
+      if (!navigator.geolocation) {
+        alert("Geolocation is not supported by your browser.");
+        return;
+      }
+
+      log("Requesting current location...");
+      btnGetLocation.disabled = true;
+      btnGetLocation.innerText = "⏳ Getting location...";
+
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const lat = position.coords.latitude;
+          const lon = position.coords.longitude;
+          const accuracy = position.coords.accuracy;
+
+          log(`Location acquired: ${lat.toFixed(6)}, ${lon.toFixed(6)} (±${Math.round(accuracy)}m)`);
+
+          resetRoute();
+          startMarker = L.marker([lat, lon]).addTo(map).bindPopup("START (Your Location)");
+          map.setView([lat, lon], 15);
+
+          log("Start point set to your current location. Now select END point on map or click button again to update.");
+
+          btnGetLocation.disabled = false;
+          btnGetLocation.innerText = "📍 Update My Location";
+        },
+        (error) => {
+          log("Location error: " + error.message);
+          alert("Failed to get your location: " + error.message + "\n\nPlease ensure you've granted location permission.");
+          btnGetLocation.disabled = false;
+          btnGetLocation.innerText = "📍 Use My Current Location as Start";
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0
+        }
+      );
+    });
 
     map.on("click", function (e) {
       if (!startMarker) {
