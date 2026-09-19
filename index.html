@@ -105,7 +105,7 @@
     }
 
     #logs {
-      height: 160px;
+      height: 170px;
       overflow-y: auto;
       background: #111827;
       color: #22c55e;
@@ -147,6 +147,16 @@
     <button id="btnFetchRoute">2. Fetch Route</button>
 
     <div class="panel">
+      <label style="display:flex; align-items:center; gap:8px; margin-top:0;">
+        <input type="checkbox" id="manualOverride" style="width:auto; margin:0;" />
+        <span>Use manual override (testing only)</span>
+      </label>
+
+      <div class="hint">
+        When OFF, default: distance, turn and road name are taken from the real route.<br />
+        When ON: the fields below force the ESP32 to show a specific arrow for testing.
+      </div>
+
       <label>Distance to turn (m)</label>
       <input type="number" id="distInput" value="150" min="0" />
 
@@ -205,6 +215,17 @@
     const btnSimulate = document.getElementById("btnSimulate");
 
     // ------------------------------------------------------------
+    // Browser support
+    // ------------------------------------------------------------
+    if (!navigator.bluetooth) {
+      alert(
+        "Web Bluetooth is not supported in this browser.\n\n" +
+        "Use Chrome or Edge on Android, or Chrome/Edge on desktop."
+      );
+      btnConnect.disabled = true;
+    }
+
+    // ------------------------------------------------------------
     // Map setup using CARTO tiles to avoid OpenStreetMap tile denial
     // ------------------------------------------------------------
     const map = L.map("map").setView([12.9716, 77.5946], 14);
@@ -259,17 +280,6 @@
     function setStatus(text, connected) {
       statusDiv.innerText = text;
       statusDiv.style.color = connected ? "#16a34a" : "#dc2626";
-    }
-
-    // ------------------------------------------------------------
-    // Browser support
-    // ------------------------------------------------------------
-    if (!navigator.bluetooth) {
-      alert(
-        "Web Bluetooth is not supported in this browser.\n\n" +
-        "Use Chrome or Edge on Android, or Chrome/Edge on desktop."
-      );
-      btnConnect.disabled = true;
     }
 
     // ------------------------------------------------------------
@@ -473,11 +483,26 @@
 
         coords.push({
           lat: round6(lat + curve),
-          lon: round6(lon - curve)
+          lon: round6(lon - curve),
+          name: "Route"
         });
       }
 
       return coords;
+    }
+
+    function dedupePoints(points) {
+      const out = [];
+
+      for (const p of points) {
+        const last = out[out.length - 1];
+
+        if (!last || last.lat !== p.lat || last.lon !== p.lon) {
+          out.push(p);
+        }
+      }
+
+      return out;
     }
 
     function drawRoute(color) {
@@ -486,6 +511,7 @@
       if (routeLine) map.removeLayer(routeLine);
 
       const leafletCoords = routeCoords.map(p => [p.lat, p.lon]);
+
       routeLine = L.polyline(leafletCoords, {
         color: color || "blue",
         weight: 5
@@ -495,7 +521,12 @@
     }
 
     function ensureRoute() {
-      if (routeCoords.length > 0) return true;
+      if (routeCoords.length > 0) {
+        if (!routeCumulative || routeCumulative.length === 0) {
+          routeCumulative = computeCumulativeDistances(routeCoords);
+        }
+        return true;
+      }
 
       if (startMarker && endMarker) {
         const s = startMarker.getLatLng();
@@ -614,6 +645,9 @@
     }
 
     function buildPacket(index, manual) {
+      const overrideChecked = document.getElementById("manualOverride").checked;
+      const effectiveManual = manual && overrideChecked;
+
       if (!ensureRoute()) {
         const center = map.getCenter();
 
@@ -635,16 +669,16 @@
           lat: round6(rider.lat),
           lon: round6(rider.lon),
           hdg: 45,
-          spd: manual
+          spd: effectiveManual
             ? parseFloat(document.getElementById("speedInput").value || 18)
             : 18,
-          dist: manual
+          dist: effectiveManual
             ? parseInt(document.getElementById("distInput").value || 150)
             : 150,
-          turn: manual
+          turn: effectiveManual
             ? parseInt(document.getElementById("turnInput").value || 0)
             : 0,
-          road: manual
+          road: effectiveManual
             ? sanitizeRoad(document.getElementById("roadInput").value)
             : "Fake Route",
           pts: pts
@@ -661,12 +695,12 @@
 
       const pts = getLookaheadPoints(safeIndex, 8, 250);
 
-      let dist = 150;
-      let turn = 0;
-      let spd = 18;
-      let road = "Route";
+      let dist;
+      let turn;
+      let spd;
+      let road;
 
-      if (manual) {
+      if (effectiveManual) {
         dist = parseInt(document.getElementById("distInput").value || 150);
         turn = parseInt(document.getElementById("turnInput").value || 0);
         spd = parseFloat(document.getElementById("speedInput").value || 18);
@@ -675,7 +709,7 @@
         dist = estimateDistanceToTurn(safeIndex);
         turn = estimateTurnType(safeIndex);
         spd = 18;
-        road = "OSRM Route";
+        road = sanitizeRoad(rider.name || "Route");
       }
 
       return {
@@ -713,7 +747,7 @@
       const urls = [
         `https://routing.openstreetmap.de/routed-bike/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
         `https://routing.openstreetmap.de/routed-bike/route/v1/bike/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
-        `https://router.project-osrm.org/route/v1/bicycle/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
+        `https://router.project-osrm.org/route/v1/cycling/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
         `https://router.project-osrm.org/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`
       ];
 
@@ -754,12 +788,46 @@
       }
 
       if (routeData) {
-        const coords = routeData.routes[0].geometry.coordinates;
+        const steps =
+          (routeData.routes[0].legs &&
+            routeData.routes[0].legs[0] &&
+            routeData.routes[0].legs[0].steps) ||
+          [];
 
-        routeCoords = coords.map(c => ({
-          lat: round6(c[1]),
-          lon: round6(c[0])
-        }));
+        routeCoords = [];
+        let lastName = "";
+
+        for (const step of steps) {
+          const nm =
+            step.name && step.name.trim() ? step.name.trim() : "";
+
+          if (nm) lastName = nm;
+
+          const geom =
+            step.geometry && step.geometry.coordinates
+              ? step.geometry.coordinates
+              : [];
+
+          for (const c of geom) {
+            routeCoords.push({
+              lat: round6(c[1]),
+              lon: round6(c[0]),
+              name: nm || lastName || "Route"
+            });
+          }
+        }
+
+        routeCoords = dedupePoints(routeCoords);
+
+        if (routeCoords.length === 0) {
+          const coords = routeData.routes[0].geometry.coordinates;
+
+          routeCoords = coords.map(c => ({
+            lat: round6(c[1]),
+            lon: round6(c[0]),
+            name: "Route"
+          }));
+        }
 
         const routeDistance = routeData.routes[0].distance;
 
@@ -801,14 +869,16 @@
         const packet = buildPacket(0, true);
         const json = JSON.stringify(packet);
 
-        log(`Sending route start packet...`);
+        const usingOverride = document.getElementById("manualOverride").checked;
+
+        log(usingOverride ? "Send Once: MANUAL OVERRIDE values" : "Send Once: from real route");
         log(`Points in packet: ${packet.pts.length}`);
 
         await sendJsonString(json);
 
         log(
-          `Manual send success: dist=${packet.dist}, ` +
-          `turn=${packet.turn}, pts=${packet.pts.length}`
+          `Send success: dist=${packet.dist}, turn=${packet.turn}, ` +
+          `road="${packet.road}", pts=${packet.pts.length}`
         );
       } catch (err) {
         log("Send error: " + err.message);
