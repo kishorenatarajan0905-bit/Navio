@@ -6,19 +6,18 @@
   <title>Bike Nav ESP32 Controller</title>
   <!--
     ============================================================================
-    BIKE NAV ESP32 CONTROLLER  —  complete single-file build
+    BIKE NAV ESP32 CONTROLLER  —  complete single-file build (GATT-race fixed)
     ----------------------------------------------------------------------------
     PAIR WITH : ESP32 firmware "50Hz / 16MHz / no-blank" (route-once protocol).
     PROTOCOL  : t:"R" = full route (sent ONCE, <=48 pts, bbox-preserving)
                 t:"U" = light scalar update (lat,lon,hdg,spd,dist,turn,road)
-    FEATURES  : Leaflet map + style picker (Esri default / Google / OSM / CARTO
-                with API-key box to remove watermark), OSRM routing with 4-server
-                fallback + generated fallback, real road names from route steps,
-                manual-override checkbox (testing only), measured-speed simulator
-                (slows into bends, no speed spike on loop), ASCII-safe BLE chunks.
+    THIS FIX  : ALL BLE writes now pass through ONE serialized queue + retry,
+                so fetch-auto-send / Send Once / Simulate can never overlap and
+                throw "GATT operation already in progress". Send errors are
+                logged (no modal) and retried automatically.
     RUN       : serve over http(s). Do NOT open via file:/// .
-                python -m http.server 8000   ->  http://localhost:8000/<this>.html
-                For phone BLE use Chrome/Edge on Android (iOS Safari has no Web BT).
+                python -m http.server 8000  ->  http://localhost:8000/<this>.html
+                Phone BLE = Chrome/Edge on Android (iOS Safari has no Web BT).
     ============================================================================
   -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -175,27 +174,52 @@
       stopSimulation();log("Disconnected.");
     });
 
-    /* ============================ ASCII-SAFE CHUNK WRITER ============================ */
+    /* ============================ SERIALIZED BLE WRITER (the fix) ============================
+       Every packet — route or update, from fetch / Send Once / Simulate — is pushed
+       through ONE promise chain, so the radio never sees two writes at once.
+       rawWrite retries transient "GATT operation already in progress" / network blips. */
     function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
     function asciiOnly(t){return String(t).replace(/[^\x20-\x7E]/g,"");}
     function hex2(n){return n.toString(16).padStart(2,"0").toUpperCase();}
-    async function writePacket(p){
-      if(characteristic.properties&&characteristic.properties.writeWithoutResponse)await characteristic.writeValueWithoutResponse(p);
-      else await characteristic.writeValue(p);
+
+    let _writeChain=Promise.resolve();
+    function serialize(job){                       // run job strictly after all prior jobs
+      const result=_writeChain.then(job,job);      // run even if a previous job rejected
+      _writeChain=result.then(()=>{},()=>{});      // never let the chain die on error
+      return result;
+    }
+    async function rawWrite(packet){
+      const MAX_TRIES=5;
+      for(let i=0;i<MAX_TRIES;i++){
+        try{
+          if(characteristic.properties&&characteristic.properties.writeWithoutResponse)
+            await characteristic.writeValueWithoutResponse(packet);
+          else
+            await characteristic.writeValue(packet);
+          return;
+        }catch(e){
+          const msg=String((e&&e.message)||e);
+          const transient=/already in progress|in progress|networkerror|operation not supported|gatt|busy|disconnect/i.test(msg);
+          if(!transient||i===MAX_TRIES-1) throw e;
+          await sleep(40*(i+1));                   // back off, then retry the SAME chunk
+        }
+      }
     }
     async function sendJsonString(js){
-      if(!characteristic||!server||!server.connected)throw new Error("Not connected");
-      const a=asciiOnly(js),b=new TextEncoder().encode(a),MAX=17;
-      let off=0,seq=0;
-      while(off<b.length){
-        const cl=Math.min(MAX,b.length-off),end=off+cl>=b.length?"1":"0";
-        const hdr=hex2(seq)+end,txt=a.slice(off,off+cl),pk=new TextEncoder().encode(hdr+txt);
-        await writePacket(pk);
-        off+=cl;seq++;
-        if(seq>255)throw new Error("packet too large");
-        await sleep(8);
-      }
-      log(`sent ${b.length} B`);
+      if(!characteristic||!server||!server.connected) throw new Error("Not connected");
+      return serialize(async()=>{
+        const a=asciiOnly(js),b=new TextEncoder().encode(a),MAX=17;
+        let off=0,seq=0;
+        while(off<b.length){
+          const cl=Math.min(MAX,b.length-off),end=off+cl>=b.length?"1":"0";
+          const hdr=hex2(seq)+end,txt=a.slice(off,off+cl),pk=new TextEncoder().encode(hdr+txt);
+          await rawWrite(pk);
+          off+=cl;seq++;
+          if(seq>255) throw new Error("packet too large");
+          await sleep(8);
+        }
+        log(`sent ${b.length} B`);
+      });
     }
 
     /* ============================ GEO HELPERS ============================ */
@@ -218,9 +242,8 @@
       if(startMarker&&endMarker){const s=startMarker.getLatLng(),e=endMarker.getLatLng();routeCoords=generateSimpleRoute(s,e,50);routeCumulative=computeCum(routeCoords);drawRoute("green");log("Fallback route generated.");return true;}
       return false;
     }
-    /* bounding-box-preserving downsample: always keeps the 4 extreme vertices
-       (min/max lat, min/max lon) + endpoints, so the rider dot (a real route
-       vertex) can never project outside the ESP32 map area. */
+    /* bounding-box-preserving downsample: keeps the 4 extreme vertices + endpoints
+       so the rider dot (a real route vertex) can never leave the ESP32 map area. */
     function downsample(c,maxN){
       const n=c.length; if(n<=maxN) return c.slice();
       const req=new Set([0,n-1]);
@@ -339,7 +362,12 @@
       }
       routeCumulative=computeCum(routeCoords);simIndex=0;routeSent=false;
       log(`Route stored: ${routeCoords.length} pts`);
-      if(characteristic&&server&&server.connected)await sendRouteOnce();
+      // auto-load the route onto the display; serialized, so a concurrent
+      // Send Once / Simulate tick can no longer collide with it.
+      if(characteristic&&server&&server.connected){
+        try{ await sendRouteOnce(); }
+        catch(e){ log("Auto route-send deferred (will resend on next Send Once): "+e.message); }
+      }
     });
 
     /* ============================ SEND ONCE ============================ */
@@ -352,7 +380,7 @@
         await sendJsonString(JSON.stringify(u));
         const usingOv=document.getElementById("manualOverride").checked;
         log(`${usingOv?"UPDATE (override)":"UPDATE (route)"}: dist=${u.dist} turn=${u.turn} road="${u.road}" spd=${u.spd}`);
-      }catch(e){log("Send error: "+e.message);alert("Send failed: "+e.message);}
+      }catch(e){ log("Send error (retried, will recover on next tap): "+e.message); }   // no modal
     });
 
     /* ============================ SIMULATE (measured speed, no loop spike) ============================ */
@@ -361,7 +389,8 @@
       if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
       if(!ensureRoute()){alert("Set START/END and Fetch Route first.");return;}
       if(simTimer){stopSimulation();return;}
-      await sendRouteOnce(); await sleep(80);
+      try{ await sendRouteOnce(); }catch(e){ log("Route pre-send retried inline: "+e.message); }
+      await sleep(80);
       simIndex=0;simDistM=0;simSpdSmooth=0;simLastTs=performance.now();
       btnSimulate.innerText="Stop Simulation";log("Simulation started (measured speed).");
       simTimer=setInterval(async()=>{
@@ -382,7 +411,7 @@
           }
           simDistM=nd;
           const u=buildUpdatePacket(simIndex,false,simSpdSmooth);
-          await sendJsonString(JSON.stringify(u));
+          await sendJsonString(JSON.stringify(u));   // serialized -> never overlaps a manual send
           log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);
         }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
       },400);   // 2.5 Hz target stream; firmware interpolates to 50 Hz. Lower to 200 for snappier glide.
