@@ -578,6 +578,20 @@
     function angleDiff(a, b) {
       return ((b - a + 540) % 360) - 180;
     }
+    function plannedSpeedKmh(index) {
+      if (!routeCoords || routeCoords.length < 3) return 18;
+      // slow down approaching a sharp bend, cruise on straights
+      let sharp = 0;
+      for (let i = index; i < Math.min(index + 6, routeCoords.length - 2); i++) {
+        const b1 = bearing(routeCoords[i], routeCoords[i + 1]);
+        const b2 = bearing(routeCoords[i + 1], routeCoords[i + 2]);
+        const d = Math.abs(angleDiff(b1, b2));
+        if (d > 25) { sharp = Math.max(sharp, Math.min(1, (d - 25) / 60)); break; }
+      }
+      const cruise = 22;          // km/h on a straight
+      const crawl  = 9;           // km/h into a turn
+      return Math.round((cruise - (cruise - crawl) * sharp) * 10) / 10;
+    }
 
     function sanitizeRoad(text) {
       return String(text || "")
@@ -774,83 +788,49 @@
       return 0;
     }
 
-    function buildPacket(index, manual) {
+    function buildPacket(index, manual, spdMeasured) {
       const overrideChecked = document.getElementById("manualOverride").checked;
       const effectiveManual = manual && overrideChecked;
 
       if (!ensureRoute()) {
         const center = map.getCenter();
-
-        const rider = {
-          lat: center.lat,
-          lon: center.lng
-        };
-
+        const rider = { lat: center.lat, lon: center.lng };
         const pts = [];
-
-        for (let i = 0; i < 6; i++) {
-          pts.push([
-            round6(rider.lat + i * 0.00015),
-            round6(rider.lon + i * 0.00015)
-          ]);
-        }
-
+        for (let i = 0; i < 6; i++)
+          pts.push([round6(rider.lat + i * 0.00015), round6(rider.lon + i * 0.00015)]);
         return {
-          lat: round6(rider.lat),
-          lon: round6(rider.lon),
-          hdg: 45,
-          spd: effectiveManual
-            ? parseFloat(document.getElementById("speedInput").value || 18)
-            : 18,
-          dist: effectiveManual
-            ? parseInt(document.getElementById("distInput").value || 150)
-            : 150,
-          turn: effectiveManual
-            ? parseInt(document.getElementById("turnInput").value || 0)
-            : 0,
-          road: effectiveManual
-            ? sanitizeRoad(document.getElementById("roadInput").value)
-            : "Fake Route",
-          pts: pts
+          lat: round6(rider.lat), lon: round6(rider.lon), hdg: 45,
+          spd: effectiveManual ? parseFloat(document.getElementById("speedInput").value || 18)
+                               : (spdMeasured != null ? spdMeasured : 18),
+          dist: effectiveManual ? parseInt(document.getElementById("distInput").value || 150) : 150,
+          turn: effectiveManual ? parseInt(document.getElementById("turnInput").value || 0) : 0,
+          road: effectiveManual ? sanitizeRoad(document.getElementById("roadInput").value) : "Fake Route",
+          pts
         };
       }
 
       const safeIndex = clamp(index, 0, routeCoords.length - 1);
       const rider = routeCoords[safeIndex];
-
-      const nextIndex = Math.min(safeIndex + 1, routeCoords.length - 1);
-      const next = routeCoords[nextIndex];
-
+      const next = routeCoords[Math.min(safeIndex + 1, routeCoords.length - 1)];
       const hdg = bearing(rider, next);
-
       const pts = getLookaheadPoints(safeIndex, 8, 250);
 
-      let dist;
-      let turn;
-      let spd;
-      let road;
-
+      let dist, turn, spd, road;
       if (effectiveManual) {
         dist = parseInt(document.getElementById("distInput").value || 150);
         turn = parseInt(document.getElementById("turnInput").value || 0);
-        spd = parseFloat(document.getElementById("speedInput").value || 18);
+        spd  = parseFloat(document.getElementById("speedInput").value || 18);
         road = sanitizeRoad(document.getElementById("roadInput").value);
       } else {
         dist = estimateDistanceToTurn(safeIndex);
         turn = estimateTurnType(safeIndex);
-        spd = 18;
+        spd  = (spdMeasured != null) ? spdMeasured : plannedSpeedKmh(safeIndex);
         road = sanitizeRoad(rider.name || "Route");
       }
-
       return {
-        lat: round6(rider.lat),
-        lon: round6(rider.lon),
-        hdg: Math.round(hdg * 10) / 10,
-        spd: Math.round(spd * 10) / 10,
-        dist: dist,
-        turn: turn,
-        road: road,
-        pts: pts
+        lat: round6(rider.lat), lon: round6(rider.lon),
+        hdg: Math.round(hdg * 10) / 10, spd: Math.round(spd * 10) / 10,
+        dist, turn, road, pts
       };
     }
 
@@ -1078,6 +1058,83 @@
           sending = false;
         }
       }, 1000);
+    });
+    // ------------------------------------------------------------
+    // Simulate ride  (distance-based, measures real ground speed)
+    // ------------------------------------------------------------
+    let simDistM = 0, simLastTs = 0, simSpdSmooth = 0;
+
+    function stopSimulation() {
+      if (simTimer) {
+        clearInterval(simTimer);
+        simTimer = null;
+      }
+      btnSimulate.innerText = "4. Simulate Ride";
+      log("Simulation stopped.");
+    }
+
+    btnSimulate.addEventListener("click", async () => {
+      if (!characteristic || !server || !server.connected) {
+        alert("Connect to ESP32 first.");
+        return;
+      }
+
+      if (!ensureRoute()) {
+        alert("Set START and END on the map first, then fetch route.");
+        return;
+      }
+
+      if (simTimer) {
+        stopSimulation();
+        return;
+      }
+
+      simIndex = 0;
+      simDistM = 0;
+      simSpdSmooth = 0;
+      simLastTs = performance.now();
+
+      btnSimulate.innerText = "Stop Simulation";
+      log("Simulation started (real measured speed).");
+
+      simTimer = setInterval(async () => {
+        if (sending) return;
+        sending = true;
+
+        try {
+          const now = performance.now();
+          let dt = (now - simLastTs) / 1000;
+          simLastTs = now;
+          dt = clamp(dt, 0.05, 0.5);
+
+          const total = routeCumulative[routeCumulative.length - 1] || 1;
+          const targetMs = plannedSpeedKmh(simIndex) / 3.6;   // m/s
+          let newDist = simDistM + targetMs * dt;
+          if (newDist >= total) { newDist = 0; simIndex = 0; }
+
+          let ni = simIndex;
+          while (ni + 1 < routeCoords.length && routeCumulative[ni + 1] <= newDist) ni++;
+
+          const moved = Math.abs(newDist - simDistM);
+          const measured = (moved / dt) * 3.6;                // true km/h
+          simSpdSmooth += (measured - simSpdSmooth) * 0.3;     // smooth
+          simDistM = newDist;
+          simIndex = ni;
+
+          const packet = buildPacket(simIndex, false, simSpdSmooth);
+          await sendJsonString(JSON.stringify(packet));
+
+          log(
+            `Sim idx=${simIndex}, dist=${packet.dist}, ` +
+            `turn=${packet.turn}, spd=${packet.spd} km/h, pts=${packet.pts.length}`
+          );
+        } catch (err) {
+          log("Simulation send error: " + err.message);
+          stopSimulation();
+        } finally {
+          sending = false;
+        }
+      }, 200);   // 5 Hz tick -> smoother motion & speed than 1 Hz
     });
   </script>
 </body>
