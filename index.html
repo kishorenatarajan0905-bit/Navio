@@ -41,7 +41,7 @@
     }
 
     #map {
-      height: 300px;
+      height: 320px;
       width: 100%;
       border-radius: 8px;
       margin-bottom: 12px;
@@ -58,26 +58,11 @@
       color: white;
     }
 
-    #btnConnect {
-      background: #16a34a;
-    }
-
-    #btnDisconnect {
-      background: #dc2626;
-      display: none;
-    }
-
-    #btnFetchRoute {
-      background: #2563eb;
-    }
-
-    #btnSendOnce {
-      background: #7c3aed;
-    }
-
-    #btnSimulate {
-      background: #ea580c;
-    }
+    #btnConnect { background: #16a34a; }
+    #btnDisconnect { background: #dc2626; display: none; }
+    #btnFetchRoute { background: #2563eb; }
+    #btnSendOnce { background: #7c3aed; }
+    #btnSimulate { background: #ea580c; }
 
     .panel {
       background: #f9fafb;
@@ -128,6 +113,24 @@
   <div class="container">
     <h2>Bike Nav ESP32 Controller</h2>
     <div id="status">Disconnected</div>
+
+    <!-- Map style picker -->
+    <div class="panel" style="margin-bottom:8px;">
+      <label style="margin-top:0;">Map style</label>
+      <select id="mapStyle">
+        <option value="esri" selected>Google-like streets (Esri, free, no key)</option>
+        <option value="google">Exact Google Maps (demo / learning only)</option>
+        <option value="osm">OpenStreetMap (free, no key)</option>
+        <option value="carto">CARTO Voyager (needs API key)</option>
+      </select>
+      <input
+        type="text"
+        id="cartoKey"
+        placeholder="Paste CARTO API key here (CARTO style only)"
+        style="display:none; margin-top:6px;"
+      />
+      <div class="hint" id="mapHint"></div>
+    </div>
 
     <div id="map"></div>
 
@@ -226,19 +229,99 @@
     }
 
     // ------------------------------------------------------------
-    // Map setup using CARTO tiles to avoid OpenStreetMap tile denial
+    // Map + style switcher
     // ------------------------------------------------------------
     const map = L.map("map").setView([12.9716, 77.5946], 14);
 
-    L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-      {
-        attribution:
-          "&copy; OpenStreetMap contributors &copy; CARTO",
-        subdomains: "abcd",
-        maxZoom: 19
+    let tileLayer = null;
+
+    function styleConfig(style, key) {
+      if (style === "google") {
+        return {
+          url: "https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+          opts: {
+            subdomains: ["mt0", "mt1", "mt2", "mt3"],
+            maxZoom: 20,
+            attribution: "Map data &copy; Google — demo / learning use only"
+          }
+        };
       }
-    ).addTo(map);
+
+      if (style === "osm") {
+        return {
+          url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+          opts: {
+            maxZoom: 19,
+            attribution: "&copy; OpenStreetMap contributors"
+          }
+        };
+      }
+
+      if (style === "carto") {
+        const base =
+          "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
+        const url = key ? base + "?api_key=" + encodeURIComponent(key) : base;
+        return {
+          url: url,
+          opts: {
+            subdomains: "abcd",
+            maxZoom: 19,
+            attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+          }
+        };
+      }
+
+      // esri (default) — Google-like streets, free, no key, no watermark
+      return {
+        url:
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        opts: {
+          maxZoom: 19,
+          attribution: "Tiles &copy; Esri — Esri, Maxar, Earthstar Geographics"
+        }
+      };
+    }
+
+    function applyMapStyle() {
+      const style = document.getElementById("mapStyle").value;
+      const key = document.getElementById("cartoKey").value.trim();
+
+      document.getElementById("cartoKey").style.display =
+        style === "carto" ? "block" : "none";
+
+      const hint = document.getElementById("mapHint");
+      if (style === "google") {
+        hint.innerHTML =
+          "Literal Google Maps tiles — looks exactly like Google Maps, no key. " +
+          "<b>Note:</b> using Google tiles outside the Google Maps API is against Google's " +
+          "Terms of Service, so keep this for classroom / learning demos only.";
+      } else if (style === "carto") {
+        hint.innerHTML =
+          "CARTO Voyager (colorful, Google-like). Paste your free CARTO API key in the box " +
+          "above to remove the “API KEY REQUIRED” watermark. Get a key at carto.com → " +
+          "Dashboard → API Keys.";
+      } else if (style === "osm") {
+        hint.innerHTML =
+          "Standard OpenStreetMap. Free, no key. Less “Google-like” styling.";
+      } else {
+        hint.innerHTML =
+          "Esri World Street Map. Free, no key, no watermark. Roads, buildings and labels " +
+          "look very similar to Google Maps. Recommended default.";
+      }
+
+      if (tileLayer) {
+        map.removeLayer(tileLayer);
+        tileLayer = null;
+      }
+
+      const cfg = styleConfig(style, key);
+      tileLayer = L.tileLayer(cfg.url, cfg.opts).addTo(map);
+    }
+
+    document.getElementById("mapStyle").addEventListener("change", applyMapStyle);
+    document.getElementById("cartoKey").addEventListener("change", applyMapStyle);
+
+    applyMapStyle();
 
     map.on("click", function (e) {
       if (!startMarker) {
