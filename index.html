@@ -19,12 +19,36 @@
     input,select{width:100%;padding:9px;margin-top:4px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box;}
     #logs{height:170px;overflow-y:auto;background:#111827;color:#22c55e;font-family:monospace;font-size:11px;padding:8px;border-radius:8px;margin-top:10px;}
     .hint{font-size:12px;color:#4b5563;margin-top:6px;}
+    
+    /* New styles for Search and Location */
+    .search-container { display: flex; gap: 8px; margin-bottom: 8px; }
+    .search-container input { flex: 1; margin-top: 0; }
+    .search-container button { width: auto; margin: 0; padding: 9px 15px; background: #0ea5e9; }
+    #searchResults { max-height: 120px; overflow-y: auto; margin-top: 5px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+    .search-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-size: 12px; color: #374151; }
+    .search-item:hover { background: #f3f4f6; }
+    .search-item:last-child { border-bottom: none; }
+    #btnMyLocation { background: #059669; }
   </style>
 </head>
 <body>
   <div class="container">
     <h2>Bike Nav ESP32 Controller</h2>
     <div id="status">Disconnected</div>
+
+    <!-- NEW: Search Bar -->
+    <div class="panel" style="margin-bottom:8px;">
+      <label style="margin-top:0; margin-bottom:5px;">🔍 Find Location</label>
+      <div class="search-container">
+        <input type="text" id="searchInput" placeholder="Type location (e.g., College Gate, Park)..." />
+        <button id="btnSearch">Search</button>
+      </div>
+      <div id="searchResults"></div>
+      <div class="hint">Click a result to zoom the map. Then click on the map to set START/END.</div>
+    </div>
+
+    <!-- NEW: Current Location Button -->
+    <button id="btnMyLocation">📍 Use My Current Location as START</button>
 
     <div class="panel" style="margin-bottom:8px;">
       <label style="margin-top:0;">Map style</label>
@@ -79,7 +103,7 @@
   <script>
     const SERVICE_UUID="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
     const CHARACTERISTIC_UUID="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-    const GOOGLE_KEY = ""; // Put your restricted Google Directions API key here if you have one.
+    const GOOGLE_KEY = ""; 
 
     let device=null,server=null,characteristic=null;
     let startMarker=null,endMarker=null,routeLine=null;
@@ -116,6 +140,7 @@
     document.getElementById("cartoKey").addEventListener("change",applyMapStyle);
     applyMapStyle();
 
+    // --- Map Click Logic ---
     map.on("click",function(e){
       if(!startMarker){startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Start point set.");}
       else if(!endMarker){endMarker=L.marker(e.latlng).addTo(map).bindPopup("END");log("End point set. Fetch route now.");}
@@ -123,13 +148,98 @@
     });
     function resetRoute(){if(startMarker)map.removeLayer(startMarker);if(endMarker)map.removeLayer(endMarker);if(routeLine)map.removeLayer(routeLine);startMarker=endMarker=routeLine=null;routeCoords=[];routeCumulative=[];routeSent=false;stopSimulation();}
 
+    // --- NEW: Search Bar Logic (Nominatim API) ---
+    document.getElementById('btnSearch').addEventListener('click', async () => {
+      const query = document.getElementById('searchInput').value.trim();
+      if (!query) return;
+      
+      log(`Searching for "${query}"...`);
+      const resDiv = document.getElementById('searchResults');
+      resDiv.innerHTML = '<div class="hint">Searching...</div>';
+
+      try {
+        // Nominatim requires a User-Agent, but browsers handle this. Limit to 5 results.
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
+        const data = await res.json();
+        
+        resDiv.innerHTML = "";
+        if (data.length === 0) {
+          resDiv.innerHTML = '<div class="hint">No results found. Try a different name.</div>';
+          return;
+        }
+
+        data.forEach(item => {
+          const div = document.createElement('div');
+          div.className = 'search-item';
+          div.innerText = item.display_name;
+          div.onclick = () => {
+            const lat = parseFloat(item.lat);
+            const lon = parseFloat(item.lon);
+            map.setView([lat, lon], 16); // Zoom in to the location
+            log(`Map moved to: ${item.display_name.substring(0, 40)}...`);
+            resDiv.innerHTML = ""; // Clear results
+          };
+          resDiv.appendChild(div);
+        });
+      } catch (err) {
+        resDiv.innerHTML = '<div class="hint">Search failed. Check internet.</div>';
+        log("Search error: " + err.message);
+      }
+    });
+
+    // Allow pressing "Enter" in the search box
+    document.getElementById('searchInput').addEventListener('keypress', function (e) {
+      if (e.key === 'Enter') document.getElementById('btnSearch').click();
+    });
+
+    // --- NEW: Current Location Logic ---
+    document.getElementById('btnMyLocation').addEventListener('click', () => {
+      if (!navigator.geolocation) {
+        alert("Geolocation is not supported by your browser.");
+        return;
+      }
+      
+      log("Requesting current location...");
+      const btn = document.getElementById('btnMyLocation');
+      btn.innerText = "Locating...";
+      btn.disabled = true;
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          
+          map.setView([lat, lon], 16);
+          
+          if (!startMarker) {
+            startMarker = L.marker([lat, lon]).addTo(map).bindPopup("START (My Location)").openPopup();
+            log("START set to your current location.");
+          } else {
+            startMarker.setLatLng([lat, lon]);
+            startMarker.setPopupContent("START (My Location)").openPopup();
+            log("START updated to your current location.");
+          }
+          
+          btn.innerText = "📍 Use My Current Location as START";
+          btn.disabled = false;
+        },
+        (err) => {
+          log("Location error: " + err.message);
+          alert("Could not get location. Ensure you are using HTTPS or localhost, and allow location permissions.");
+          btn.innerText = "📍 Use My Current Location as START";
+          btn.disabled = false;
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    });
+
     function log(m){const t=new Date().toLocaleTimeString();logDiv.innerHTML+=`[${t}] ${m}<br>`;logDiv.scrollTop=logDiv.scrollHeight;}
     function setStatus(t,c){statusDiv.innerText=t;statusDiv.style.color=c?"#16a34a":"#dc2626";}
 
     btnConnect.addEventListener("click",async()=>{try{log("Requesting device...");device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});log(`Connecting to ${device.name||"?"}...`);server=await device.gatt.connect();const s=await server.getPrimaryService(SERVICE_UUID);characteristic=await s.getCharacteristic(CHARACTERISTIC_UUID);setStatus("CONNECTED",true);btnConnect.style.display="none";btnDisconnect.style.display="block";routeSent=false;log("BLE connected.");}catch(e){log("BLE fail: "+e.message);alert("Connection failed: "+e.message);}});
     btnDisconnect.addEventListener("click",()=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect();setStatus("DISCONNECTED",false);btnConnect.style.display="block";btnDisconnect.style.display="none";stopSimulation();log("Disconnected.");});
 
-    // --- SERIALIZED BLE WRITER (Fixes GATT Race) ---
+    // --- SERIALIZED BLE WRITER ---
     function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
     function asciiOnly(t){return String(t).replace(/[^\x20-\x7E]/g,"");}
     function hex2(n){return n.toString(16).padStart(2,"0").toUpperCase();}
@@ -215,14 +325,10 @@
           const d=await res.json();
           const ok = isGoogle ? (d.status==="OK") : (d.code==="Ok");
           if(!ok){ le=new Error(d.status||d.message||"not ok"); log("Failed: "+le.message); continue; }
-          // Simple extraction for OSRM/Google
           let coords=[];
           if(d.routes && d.routes[0]){
-             if(d.routes[0].geometry && d.routes[0].geometry.coordinates){ // OSRM
+             if(d.routes[0].geometry && d.routes[0].geometry.coordinates){ 
                  coords = d.routes[0].geometry.coordinates.map(c=>({lat:round6(c[1]),lon:round6(c[0]),name:"Route"}));
-             } else if (d.routes[0].overview_polyline && d.routes[0].overview_polyline.points) { // Google (simplified)
-                 // Note: Full Google polyline decoding is omitted for brevity, fallback to OSRM if this fails.
-                 log("Google polyline decoding skipped in this minimal build, using fallback.");
              }
           }
           if(coords.length > 0) { ex={coords:dedupe(coords), distanceM:d.routes[0].distance||0}; log(isGoogle?"Google route loaded.":"OSRM route loaded."); break; }
