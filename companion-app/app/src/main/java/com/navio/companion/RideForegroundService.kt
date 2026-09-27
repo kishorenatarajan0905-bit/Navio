@@ -39,7 +39,7 @@ class RideForegroundService : Service() {
     }
 
     private fun createChannel() {
-        val channel = Notification.Channel(
+        val channel = NotificationChannel(
             CHANNEL_ID,
             "Ride",
             NotificationManager.IMPORTANCE_LOW
