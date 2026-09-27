@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Navio" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#2563eb</item>
+        <item name="android:colorAccent">#2563eb</item>
+        <item name="android:statusBarColor">#1f2937</item>
+    </style>
+</resources>

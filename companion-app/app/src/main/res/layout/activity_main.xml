@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="14dp">
+
+    <TextView
+        android:id="@+id/statusView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:textStyle="bold"
+        android:textColor="#dc2626"
+        android:textSize="16sp"
+        android:text="Disconnected" />
+
+    <TextView
+        android:id="@+id/hintNotif"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:textColor="#b45309"
+        android:textSize="12sp"
+        android:visibility="gone"
+        android:text="Enable notification access below to auto-read Swiggy/Zomato orders" />
+
+    <Button
+        android:id="@+id/btnNotifSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:visibility="gone"
+        android:text="Enable Notification Access" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:textStyle="bold"
+        android:text="Destination" />
+
+    <TextView
+        android:id="@+id/destView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#1f2937"
+        android:textSize="13sp"
+        android:text="Waiting for Swiggy/Zomato order..." />
+
+    <EditText
+        android:id="@+id/addressInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:hint="Manual address (fallback)"
+        android:inputType="textPostalAddress" />
+
+    <Button
+        android:id="@+id/btnConnect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:backgroundTint="#16a34a"
+        android:textColor="#ffffff"
+        android:text="Connect to ESP32" />
+
+    <Button
+        android:id="@+id/btnStart"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:backgroundTint="#2563eb"
+        android:textColor="#ffffff"
+        android:text="Start Ride" />
+
+    <Button
+        android:id="@+id/btnStop"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:backgroundTint="#dc2626"
+        android:textColor="#ffffff"
+        android:text="Stop Ride" />
+
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="10dp"
+        android:background="#111827">
+
+        <TextView
+            android:id="@+id/logView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="8dp"
+            android:fontFamily="monospace"
+            android:textColor="#22c55e"
+            android:textSize="11sp"
+            android:text="Ready..." />
+    </ScrollView>
+</LinearLayout>
