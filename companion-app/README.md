@@ -23,6 +23,18 @@ Android companion app that bridges food-delivery apps (Swiggy, Zomato) to the Na
 The BLE protocol is byte-for-byte compatible with `index.html` (the web debug controller),
 which sends the same `t:"R"` route packets and `t:"U"` position/turn packets.
 
+## Sliding-window map chunking
+
+The full high-resolution route stays on the phone. Instead of downsampling a 20 km
+route into 48 points (blocky), the app sends ~46-point chunks (a few hundred meters
+each) with a 5-point overlap, sliding forward as the rider approaches the edge of the
+current window. The ESP32's auto-scaling display zooms into each new chunk, keeping
+the map smooth and detailed. Turn detection also runs on the full-resolution route.
+
+Chunk parameters (in `ChunkManager.kt`): `CHUNK_SIZE = 46`, `OVERLAP_POINTS = 5`,
+`TRIGGER_AHEAD = 16` (send next chunk when ≤16 points remain; also re-sends if the
+rider snaps behind the current window).
+
 ## BLE wire protocol
 
 - Service UUID: `6e400001-b5a3-f393-e0a9-e50e24dcca9e`

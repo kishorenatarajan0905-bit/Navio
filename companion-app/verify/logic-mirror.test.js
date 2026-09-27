@@ -122,6 +122,25 @@ function reassemble(packets) {
   return packets.map(p => p.slice(3)).join("");
 }
 
+// --- Mirror of ChunkManager (sliding window) ---
+const CHUNK_SIZE = 46, OVERLAP_POINTS = 5, TRIGGER_AHEAD = 16;
+let chunkStartIdx = 0, chunkEndIdx = 0;
+function chunkReset() { chunkStartIdx = 0; chunkEndIdx = 0; }
+function windowFor(riderIdx, total) {
+  const start = Math.max(0, riderIdx - OVERLAP_POINTS);
+  const end = Math.min(total, start + CHUNK_SIZE);
+  return [start, end];
+}
+function needsNewChunk(riderIdx, total) {
+  if (total <= 0) return false;
+  if (chunkEndIdx >= total) return false;
+  if (riderIdx >= chunkEndIdx - TRIGGER_AHEAD) return true;
+  if (riderIdx + OVERLAP_POINTS < chunkStartIdx) return true;
+  return false;
+}
+function windowChanged(start, end) { return start !== chunkStartIdx || end > chunkEndIdx; }
+function applyWindow(start, end) { chunkStartIdx = start; chunkEndIdx = end; }
+
 // ===================== TESTS =====================
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -246,6 +265,48 @@ test("BLE large route packet count", () => {
   const packets = chunkJson(json);
   assert.strictEqual(reassemble(packets), json);
   assert.ok(packets.length < 255);
+});
+
+test("windowFor clamps at start and end", () => {
+  assert.deepStrictEqual(windowFor(0, 100), [0, 46]);
+  assert.deepStrictEqual(windowFor(3, 100), [0, 46]);
+  assert.deepStrictEqual(windowFor(10, 100), [5, 51]);
+  assert.deepStrictEqual(windowFor(98, 100), [93, 100]);
+  assert.deepStrictEqual(windowFor(0, 20), [0, 20]);
+});
+test("needsNewChunk forward trigger", () => {
+  chunkReset(); applyWindow(0, 46);
+  assert.strictEqual(needsNewChunk(0, 413), false);
+  assert.strictEqual(needsNewChunk(29, 413), false);
+  assert.strictEqual(needsNewChunk(30, 413), true);
+});
+test("needsNewChunk behind trigger", () => {
+  chunkReset(); applyWindow(30, 76);
+  assert.strictEqual(needsNewChunk(2, 413), true);
+  assert.strictEqual(needsNewChunk(26, 413), false);
+});
+test("final chunk guard stops re-sends", () => {
+  chunkReset(); applyWindow(69, 90);
+  assert.strictEqual(needsNewChunk(89, 90), false);
+  assert.strictEqual(needsNewChunk(80, 90), false);
+});
+test("sliding window covers full route", () => {
+  const total = 413;
+  chunkReset();
+  const [s0, e0] = windowFor(0, total);
+  applyWindow(s0, e0);
+  let chunks = 0, maxChunk = 0, rider = 0;
+  while (rider < total) {
+    if (needsNewChunk(rider, total)) {
+      const [start, end] = windowFor(rider, total);
+      if (windowChanged(start, end)) { applyWindow(start, end); chunks++; maxChunk = Math.max(maxChunk, end - start); }
+    }
+    assert.ok(rider >= chunkStartIdx && rider < chunkEndIdx, `rider ${rider} outside [${chunkStartIdx}, ${chunkEndIdx})`);
+    rider++;
+  }
+  assert.ok(chunks > 5, "chunks " + chunks);
+  assert.ok(maxChunk <= CHUNK_SIZE, "maxChunk " + maxChunk);
+  assert.strictEqual(chunkEndIdx, total);
 });
 
 console.log("\n" + passed + " passed, " + failed + " failed");

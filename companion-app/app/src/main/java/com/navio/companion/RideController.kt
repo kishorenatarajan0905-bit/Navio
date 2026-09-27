@@ -204,6 +204,9 @@ object RideController {
             "\"hdg\":${GeoMath.round1(hdg)},\"spd\":${GeoMath.round1(speedSmooth)}," +
             "\"dist\":$dist,\"turn\":$turn,\"road\":\"$road\"}"
         client.sendJson(json)
+        if (ChunkManager.needsNewChunk(si, routeCoords.size)) {
+            sendChunk(si)
+        }
     }
 
     private suspend fun routeAndSend(): Boolean {
@@ -233,23 +236,28 @@ object RideController {
         lastSentLoc = null
         lastSendTs = 0L
         log("Route: ${routeCoords.size} pts, ${"%.2f".format(result.distanceM / 1000.0)} km")
-        return sendRoutePacket()
+        ChunkManager.reset()
+        return sendChunk(0)
     }
 
-    private suspend fun sendRoutePacket(): Boolean {
+    private suspend fun sendChunk(riderIdx: Int): Boolean {
         if (routeCoords.isEmpty()) return false
         val client = bleClient ?: run {
-            log("Not connected — route will send after BLE connects")
+            log("Not connected — map chunk deferred")
             return false
         }
-        val pts = RouteMath.downsample(routeCoords, 48)
+        val (start, end) = ChunkManager.windowFor(riderIdx, routeCoords.size)
+        if (!ChunkManager.windowChanged(start, end)) return true
+        val pts = routeCoords.subList(start, end)
             .map { "[${GeoMath.round6(it.lat)},${GeoMath.round6(it.lon)}]" }
         val json = "{\"t\":\"R\",\"pts\":${pts.joinToString(",", prefix = "[", postfix = "]")}}"
         return try {
             client.sendJson(json)
+            ChunkManager.applyWindow(start, end)
+            log("Sent map chunk: ${end - start} pts (idx $start..$end)")
             true
         } catch (e: Exception) {
-            log("Route send failed: ${e.message}")
+            log("Chunk send failed: ${e.message}")
             false
         }
     }
@@ -279,6 +287,7 @@ object RideController {
         routeNames = emptyList()
         routeCum = emptyList()
         lastSentLoc = null
+        ChunkManager.reset()
         emitStatus()
         log("Ride stopped")
     }
