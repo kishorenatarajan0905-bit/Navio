@@ -90,7 +90,8 @@
     </div>
 
     <button id="btnSendOnce">3. Send Once to ESP32</button>
-    <button id="btnSimulate">4. Simulate Ride</button>
+    <button id="btnSimulate">4. Simulate Ride (Fake)</button>
+    <button id="btnLiveRide" style="background:#10b981; display:none;">5. Start Live GPS Ride</button>
 
     <div id="logs">Ready...</div>
   </div>
@@ -109,11 +110,16 @@
     let tileLayer=null;
 
     // --- SLIDING WINDOW PROTOCOL VARIABLES ---
-    const CHUNK_SIZE = 46;       // Max points ESP32 can handle smoothly
-    const OVERLAP_POINTS = 5;    // Overlap to prevent rider falling off edge
-    const TRIGGER_THRESHOLD = 30; // Send next chunk when rider passes this index
-    let fullRoutePoints = [];    // Stores the high-res full route
-    let currentChunkEndIndex = 0; // Tracks how far we have sent
+    const CHUNK_SIZE = 46;       
+    const OVERLAP_POINTS = 5;    
+    const TRIGGER_THRESHOLD = 30; 
+    let fullRoutePoints = [];    
+    let currentChunkEndIndex = 0; 
+    let isChunkSending = false; 
+
+    // --- LIVE GPS VARIABLES ---
+    let liveWatchId = null;
+    const btnLiveRide = document.getElementById("btnLiveRide");
 
     const statusDiv=document.getElementById("status"),logDiv=document.getElementById("logs");
     const btnConnect=document.getElementById("btnConnect"),btnDisconnect=document.getElementById("btnDisconnect");
@@ -148,7 +154,15 @@
       else if(!endMarker){endMarker=L.marker(e.latlng).addTo(map).bindPopup("END");log("End point set. Fetch route now.");}
       else{resetRoute();startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Reset. New start point set.");}
     });
-    function resetRoute(){if(startMarker)map.removeLayer(startMarker);if(endMarker)map.removeLayer(endMarker);if(routeLine)map.removeLayer(routeLine);startMarker=endMarker=routeLine=null;routeCoords=[];routeCumulative=[];stopSimulation();}
+    function resetRoute(){
+      if(startMarker)map.removeLayer(startMarker);
+      if(endMarker)map.removeLayer(endMarker);
+      if(routeLine)map.removeLayer(routeLine);
+      startMarker=endMarker=routeLine=null;
+      routeCoords=[];routeCumulative=[];
+      stopSimulation();
+      if(liveWatchId) { navigator.geolocation.clearWatch(liveWatchId); liveWatchId=null; btnLiveRide.innerText="5. Start Live GPS Ride"; btnLiveRide.style.display="none"; }
+    }
 
     document.getElementById('btnSearch').addEventListener('click', async () => {
       const query = document.getElementById('searchInput').value.trim();
@@ -188,7 +202,7 @@
           map.setView([lat, lon], 16);
           if (!startMarker) { startMarker = L.marker([lat, lon]).addTo(map).bindPopup("START (My Location)").openPopup(); log("START set to current location."); }
           else { startMarker.setLatLng([lat, lon]); startMarker.setPopupContent("START (My Location)").openPopup(); log("START updated to current location."); }
-          btn.innerText = " Use My Current Location as START"; btn.disabled = false;
+          btn.innerText = "📍 Use My Current Location as START"; btn.disabled = false;
         },
         (err) => { log("Location error: " + err.message); alert("Could not get location."); btn.innerText = "📍 Use My Current Location as START"; btn.disabled = false; },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
@@ -243,28 +257,43 @@
     function initializeSlidingWindow(routeData) {
         fullRoutePoints = routeData;
         currentChunkEndIndex = 0;
-        sendNextChunk(0); 
+        sendNextChunk(0).then(() => {
+            // Send a dummy position update immediately so ESP32 switches to LIVE mode
+            if(routeCoords.length > 0) {
+                const u = buildUpdatePacket(0, false, 0); 
+                return sendJsonString(JSON.stringify(u));
+            }
+        }).then(() => log("Initial map chunk and position sent."));
     }
 
     function sendNextChunk(riderIndex) {
-       let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
-       let endIdx = startIdx + CHUNK_SIZE;
-       if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
+        if (isChunkSending) return Promise.resolve(); 
 
-       if (endIdx > currentChunkEndIndex) {
-           let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
-           let packet = {
-               t: "R",
-               pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)])
-           };
-           // CHANGE THIS LINE TO RETURN THE PROMISE:
-           return sendJsonString(JSON.stringify(packet)).then(() => {
-               currentChunkEndIndex = endIdx;
-               log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
-           });
-       }
-       return Promise.resolve();
-   }
+        let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
+        let endIdx = startIdx + CHUNK_SIZE;
+        if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
+
+        if (endIdx > currentChunkEndIndex) {
+            let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
+            let packet = {
+                t: "R",
+                pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)])
+            };
+            
+            isChunkSending = true;
+            log(`Requesting Map Chunk...`);
+
+            return sendJsonString(JSON.stringify(packet)).then(() => {
+                currentChunkEndIndex = endIdx;
+                isChunkSending = false; 
+                log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
+            }).catch(err => {
+                isChunkSending = false; 
+                log("Chunk send failed: " + err.message);
+            });
+        }
+        return Promise.resolve();
+    }
 
     function checkRouteUpdate(riderIndex) {
         let pointsRemainingInChunk = currentChunkEndIndex - riderIndex;
@@ -272,6 +301,65 @@
             sendNextChunk(riderIndex);
         }
     }
+
+    // --- LIVE GPS FUNCTIONS ---
+    function findClosestRouteIndex(lat, lon) {
+        let minDist = Infinity;
+        let closestIdx = simIndex; // Start searching near current index
+        let startSearch = Math.max(0, simIndex - 50); 
+        let endSearch = Math.min(routeCoords.length, simIndex + 100);
+        
+        for (let i = startSearch; i < endSearch; i++) {
+            let d = haversine({lat: lat, lon: lon}, routeCoords[i]);
+            if (d < minDist) {
+                minDist = d;
+                closestIdx = i;
+            }
+        }
+        return closestIdx;
+    }
+
+    btnLiveRide.addEventListener("click", () => {
+        if (liveWatchId) {
+            navigator.geolocation.clearWatch(liveWatchId);
+            liveWatchId = null;
+            btnLiveRide.innerText = "5. Start Live GPS Ride";
+            btnLiveRide.style.background = "#10b981";
+            log("Live GPS tracking stopped.");
+            return;
+        }
+
+        if (!navigator.geolocation) { alert("GPS not supported"); return; }
+        if(routeCoords.length === 0) { alert("Fetch a route first!"); return; }
+        
+        log("Requesting GPS permissions...");
+        btnLiveRide.innerText = "Tracking GPS...";
+        btnLiveRide.style.background = "#ef4444"; 
+
+        liveWatchId = navigator.geolocation.watchPosition(
+            (pos) => {
+                const lat = pos.coords.latitude;
+                const lon = pos.coords.longitude;
+                let speedKmh = pos.coords.speed ? (pos.coords.speed * 3.6) : 0; 
+
+                simIndex = findClosestRouteIndex(lat, lon);
+
+                const u = buildUpdatePacket(simIndex, false, speedKmh);
+                if(pos.coords.heading && !isNaN(pos.coords.heading)) {
+                    u.hdg = Math.round(pos.coords.heading * 10) / 10;
+                }
+                
+                sendJsonString(JSON.stringify(u));
+                checkRouteUpdate(simIndex);
+
+                log(`LIVE GPS: idx=${simIndex} spd=${speedKmh.toFixed(1)}km/h`);
+            },
+            (err) => {
+                log("GPS Error: " + err.message);
+            },
+            { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+        );
+    });
 
     function toRad(d){return d*Math.PI/180;} function toDeg(r){return r*180/Math.PI;}
     function round6(v){return Math.round(v*1e6)/1e6;} function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
@@ -333,40 +421,26 @@
       routeCumulative=computeCum(routeCoords);simIndex=0;
       log(`Route stored: ${routeCoords.length} pts`);
       
-      // --- SLIDING WINDOW INIT ---
+      btnLiveRide.style.display = "block"; // Show Live GPS button
+
       if(characteristic&&server&&server.connected){
           initializeSlidingWindow(routeCoords);
       }
     });
 
-       btnSendOnce.addEventListener("click",async()=>{
-       if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
-       try {
-           // 1. Initialize the sliding window if we haven't yet
-           if(fullRoutePoints.length === 0 && routeCoords.length > 0) {
-               initializeSlidingWindow(routeCoords);
-           }
-           
-           // 2. Send the map chunk and WAIT for it
-           await sendNextChunk(0);
-           log("Sent initial map chunk.");
+    btnSendOnce.addEventListener("click",async()=>{
+        if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
+        if(fullRoutePoints.length === 0 && routeCoords.length > 0) initializeSlidingWindow(routeCoords);
+        sendNextChunk(0);
+        log("Sent initial map chunk.");
+    });
 
-           // 3. Send a position update immediately so ESP32 switches to LIVE mode
-           if(routeCoords.length > 0) {
-               const u = buildUpdatePacket(0, false, 0); // 0 speed for initial lock
-               await sendJsonString(JSON.stringify(u));
-               log("Sent initial position update to switch to LIVE mode.");
-           }
-       } catch(e) {
-           log("Send Once error: " + e.message);
-       }
-   });
-
-    function stopSimulation(){if(simTimer){clearInterval(simTimer);simTimer=null;}btnSimulate.innerText="4. Simulate Ride";log("Simulation stopped.");}
+    function stopSimulation(){if(simTimer){clearInterval(simTimer);simTimer=null;}btnSimulate.innerText="4. Simulate Ride (Fake)";log("Simulation stopped.");}
     btnSimulate.addEventListener("click",async()=>{
       if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
       if(!ensureRoute()){alert("Set START/END and Fetch Route first.");return;}
       if(simTimer){stopSimulation();return;}
+      if(liveWatchId){navigator.geolocation.clearWatch(liveWatchId);liveWatchId=null;btnLiveRide.innerText="5. Start Live GPS Ride";btnLiveRide.style.background="#10b981";}
       
       if(fullRoutePoints.length === 0) initializeSlidingWindow(routeCoords);
       
@@ -385,10 +459,7 @@
           
           const u=buildUpdatePacket(simIndex,false,simSpdSmooth);
           await sendJsonString(JSON.stringify(u));
-          
-          // --- CHECK FOR NEXT MAP CHUNK ---
           checkRouteUpdate(simIndex);
-          
           log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);
         }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
       },400);
