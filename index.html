@@ -108,6 +108,7 @@
     let simTimer=null,simIndex=0,sending=false;
     let simDistM=0,simLastTs=0,simSpdSmooth=0;
     let tileLayer=null;
+    let rawGpsMarker = null; // For visual debugging of raw GPS
 
     // --- SLIDING WINDOW PROTOCOL VARIABLES ---
     const CHUNK_SIZE = 46;       
@@ -158,7 +159,8 @@
       if(startMarker)map.removeLayer(startMarker);
       if(endMarker)map.removeLayer(endMarker);
       if(routeLine)map.removeLayer(routeLine);
-      startMarker=endMarker=routeLine=null;
+      if(rawGpsMarker)map.removeLayer(rawGpsMarker);
+      startMarker=endMarker=routeLine=rawGpsMarker=null;
       routeCoords=[];routeCumulative=[];
       stopSimulation();
       if(liveWatchId) { navigator.geolocation.clearWatch(liveWatchId); liveWatchId=null; btnLiveRide.innerText="5. Start Live GPS Ride"; btnLiveRide.style.display="none"; }
@@ -258,7 +260,6 @@
         fullRoutePoints = routeData;
         currentChunkEndIndex = 0;
         sendNextChunk(0).then(() => {
-            // Send a dummy position update immediately so ESP32 switches to LIVE mode
             if(routeCoords.length > 0) {
                 const u = buildUpdatePacket(0, false, 0); 
                 return sendJsonString(JSON.stringify(u));
@@ -268,29 +269,20 @@
 
     function sendNextChunk(riderIndex) {
         if (isChunkSending) return Promise.resolve(); 
-
         let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
         let endIdx = startIdx + CHUNK_SIZE;
         if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
 
         if (endIdx > currentChunkEndIndex) {
             let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
-            let packet = {
-                t: "R",
-                pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)])
-            };
-            
+            let packet = { t: "R", pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)]) };
             isChunkSending = true;
             log(`Requesting Map Chunk...`);
-
             return sendJsonString(JSON.stringify(packet)).then(() => {
                 currentChunkEndIndex = endIdx;
                 isChunkSending = false; 
                 log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
-            }).catch(err => {
-                isChunkSending = false; 
-                log("Chunk send failed: " + err.message);
-            });
+            }).catch(err => { isChunkSending = false; log("Chunk send failed: " + err.message); });
         }
         return Promise.resolve();
     }
@@ -302,21 +294,31 @@
         }
     }
 
-    // --- LIVE GPS FUNCTIONS ---
-    function findClosestRouteIndex(lat, lon) {
+    // --- PERFECTED LIVE GPS FUNCTIONS ---
+    
+    // Smart Snapping: Finds closest point but penalizes going backwards to prevent jitter
+    function findClosestRouteIndexSmart(lat, lon, currentIndex) {
         let minDist = Infinity;
-        let closestIdx = simIndex; // Start searching near current index
-        let startSearch = Math.max(0, simIndex - 50); 
-        let endSearch = Math.min(routeCoords.length, simIndex + 100);
+        let bestIdx = currentIndex;
+        // Search window: 20 points behind to 150 points ahead
+        let startSearch = Math.max(0, currentIndex - 20); 
+        let endSearch = Math.min(routeCoords.length, currentIndex + 150);
         
         for (let i = startSearch; i < endSearch; i++) {
             let d = haversine({lat: lat, lon: lon}, routeCoords[i]);
+            // Add a 10-meter penalty for points behind the current index
+            // This stops the dot from vibrating backward when GPS drifts
+            if (i < currentIndex) d += 10; 
+
             if (d < minDist) {
                 minDist = d;
-                closestIdx = i;
+                bestIdx = i;
             }
         }
-        return closestIdx;
+        // If the closest point is still > 100 meters away, it's a GPS glitch. Stay put.
+        if (minDist > 100) return currentIndex;
+
+        return bestIdx;
     }
 
     btnLiveRide.addEventListener("click", () => {
@@ -325,6 +327,7 @@
             liveWatchId = null;
             btnLiveRide.innerText = "5. Start Live GPS Ride";
             btnLiveRide.style.background = "#10b981";
+            if(rawGpsMarker) map.removeLayer(rawGpsMarker);
             log("Live GPS tracking stopped.");
             return;
         }
@@ -332,7 +335,7 @@
         if (!navigator.geolocation) { alert("GPS not supported"); return; }
         if(routeCoords.length === 0) { alert("Fetch a route first!"); return; }
         
-        log("Requesting GPS permissions...");
+        log("Requesting High-Accuracy GPS...");
         btnLiveRide.innerText = "Tracking GPS...";
         btnLiveRide.style.background = "#ef4444"; 
 
@@ -340,24 +343,63 @@
             (pos) => {
                 const lat = pos.coords.latitude;
                 const lon = pos.coords.longitude;
-                let speedKmh = pos.coords.speed ? (pos.coords.speed * 3.6) : 0; 
+                const accuracy = pos.coords.accuracy; // in meters
 
-                simIndex = findClosestRouteIndex(lat, lon);
-
-                const u = buildUpdatePacket(simIndex, false, speedKmh);
-                if(pos.coords.heading && !isNaN(pos.coords.heading)) {
-                    u.hdg = Math.round(pos.coords.heading * 10) / 10;
+                // 1. ACCURACY FILTER: Ignore bad GPS fixes (common indoors)
+                if (accuracy > 30) {
+                    log(`GPS ignored (Accuracy: ${Math.round(accuracy)}m)`);
+                    return; 
                 }
+
+                // 2. VISUAL DEBUGGING: Draw raw GPS as a Red Dot on the web map
+                if (!rawGpsMarker) {
+                    rawGpsMarker = L.circleMarker([lat, lon], {color: 'red', radius: 6, fillOpacity: 0.8}).addTo(map).bindPopup("Raw GPS");
+                } else {
+                    rawGpsMarker.setLatLng([lat, lon]);
+                }
+
+                // 3. SAFE SPEED/HEADING CALCULATION
+                // Phone browsers often return null or negative speed when standing still
+                let speedKmh = (pos.coords.speed !== null && pos.coords.speed >= 0) ? (pos.coords.speed * 3.6) : 0; 
+                let heading = pos.coords.heading;
+
+                // 4. SMART SNAPPING
+                let newIdx = findClosestRouteIndexSmart(lat, lon, simIndex);
+                
+                // Prevent massive jumps: if new index is too far from current, ignore it
+                if (Math.abs(newIdx - simIndex) > 50) {
+                    log(`GPS jump ignored (Index jump: ${Math.abs(newIdx - simIndex)})`);
+                    newIdx = simIndex;
+                }
+                simIndex = newIdx;
+
+                // 5. HEADING FALLBACK
+                // GPS heading is garbage below 2 km/h. Use the route's direction instead.
+                if (speedKmh < 2.0 || isNaN(heading) || heading === null) {
+                    let nextIdx = Math.min(simIndex + 1, routeCoords.length - 1);
+                    heading = bearing(routeCoords[simIndex], routeCoords[nextIdx]);
+                }
+
+                // 6. SEND DATA
+                const u = buildUpdatePacket(simIndex, false, speedKmh);
+                u.hdg = Math.round(heading * 10) / 10; // Force the smart heading
                 
                 sendJsonString(JSON.stringify(u));
                 checkRouteUpdate(simIndex);
 
-                log(`LIVE GPS: idx=${simIndex} spd=${speedKmh.toFixed(1)}km/h`);
+                // Only log every 5 updates to prevent spamming the log box
+                if (simIndex % 5 === 0) {
+                    log(`LIVE GPS: idx=${simIndex} spd=${speedKmh.toFixed(1)}km/h acc=${Math.round(accuracy)}m`);
+                }
             },
             (err) => {
                 log("GPS Error: " + err.message);
             },
-            { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+            { 
+                enableHighAccuracy: true, // Forces actual GPS satellite lock, not just Wi-Fi
+                maximumAge: 0,            // Never use cached old positions
+                timeout: 15000            // Give the GPS chip 15 seconds to lock on
+            }
         );
     });
 
@@ -421,7 +463,7 @@
       routeCumulative=computeCum(routeCoords);simIndex=0;
       log(`Route stored: ${routeCoords.length} pts`);
       
-      btnLiveRide.style.display = "block"; // Show Live GPS button
+      btnLiveRide.style.display = "block"; 
 
       if(characteristic&&server&&server.connected){
           initializeSlidingWindow(routeCoords);
