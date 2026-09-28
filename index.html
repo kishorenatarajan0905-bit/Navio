@@ -90,10 +90,12 @@
     </div>
 
     <button id="btnSendOnce">3. Send Once to ESP32</button>
+    
     <div class="panel" style="padding: 8px;">
       <label style="margin-top:0; font-size: 12px;"> Simulation Speed: <span id="speedMultVal" style="color:#ea580c; font-weight:bold;">10</span>x</label>
       <input type="range" id="simSpeedMult" min="1" max="50" value="10" style="width: 100%; margin-top: 4px;">
     </div>
+    
     <button id="btnSimulate">4. Simulate Ride (Fake)</button>
     <button id="btnLiveRide" style="background:#10b981; display:none;">5. Start Live GPS Ride</button>
 
@@ -112,7 +114,7 @@
     let simTimer=null,simIndex=0,sending=false;
     let simDistM=0,simLastTs=0,simSpdSmooth=0;
     let tileLayer=null;
-    let rawGpsMarker = null; // For visual debugging of raw GPS
+    let rawGpsMarker = null;
 
     // --- SLIDING WINDOW PROTOCOL VARIABLES ---
     const CHUNK_SIZE = 46;       
@@ -298,30 +300,19 @@
         }
     }
 
-    // --- PERFECTED LIVE GPS FUNCTIONS ---
-    
-    // Smart Snapping: Finds closest point but penalizes going backwards to prevent jitter
+    // --- LIVE GPS FUNCTIONS ---
     function findClosestRouteIndexSmart(lat, lon, currentIndex) {
         let minDist = Infinity;
         let bestIdx = currentIndex;
-        // Search window: 20 points behind to 150 points ahead
         let startSearch = Math.max(0, currentIndex - 20); 
         let endSearch = Math.min(routeCoords.length, currentIndex + 150);
         
         for (let i = startSearch; i < endSearch; i++) {
             let d = haversine({lat: lat, lon: lon}, routeCoords[i]);
-            // Add a 10-meter penalty for points behind the current index
-            // This stops the dot from vibrating backward when GPS drifts
             if (i < currentIndex) d += 10; 
-
-            if (d < minDist) {
-                minDist = d;
-                bestIdx = i;
-            }
+            if (d < minDist) { minDist = d; bestIdx = i; }
         }
-        // If the closest point is still > 100 meters away, it's a GPS glitch. Stay put.
         if (minDist > 100) return currentIndex;
-
         return bestIdx;
     }
 
@@ -347,63 +338,36 @@
             (pos) => {
                 const lat = pos.coords.latitude;
                 const lon = pos.coords.longitude;
-                const accuracy = pos.coords.accuracy; // in meters
+                const accuracy = pos.coords.accuracy;
 
-                // 1. ACCURACY FILTER: Ignore bad GPS fixes (common indoors)
-                if (accuracy > 30) {
-                    log(`GPS ignored (Accuracy: ${Math.round(accuracy)}m)`);
-                    return; 
-                }
+                if (accuracy > 30) { return; }
 
-                // 2. VISUAL DEBUGGING: Draw raw GPS as a Red Dot on the web map
                 if (!rawGpsMarker) {
                     rawGpsMarker = L.circleMarker([lat, lon], {color: 'red', radius: 6, fillOpacity: 0.8}).addTo(map).bindPopup("Raw GPS");
-                } else {
-                    rawGpsMarker.setLatLng([lat, lon]);
-                }
+                } else { rawGpsMarker.setLatLng([lat, lon]); }
 
-                // 3. SAFE SPEED/HEADING CALCULATION
-                // Phone browsers often return null or negative speed when standing still
                 let speedKmh = (pos.coords.speed !== null && pos.coords.speed >= 0) ? (pos.coords.speed * 3.6) : 0; 
                 let heading = pos.coords.heading;
 
-                // 4. SMART SNAPPING
                 let newIdx = findClosestRouteIndexSmart(lat, lon, simIndex);
-                
-                // Prevent massive jumps: if new index is too far from current, ignore it
-                if (Math.abs(newIdx - simIndex) > 50) {
-                    log(`GPS jump ignored (Index jump: ${Math.abs(newIdx - simIndex)})`);
-                    newIdx = simIndex;
-                }
+                if (Math.abs(newIdx - simIndex) > 50) { newIdx = simIndex; }
                 simIndex = newIdx;
 
-                // 5. HEADING FALLBACK
-                // GPS heading is garbage below 2 km/h. Use the route's direction instead.
                 if (speedKmh < 2.0 || isNaN(heading) || heading === null) {
                     let nextIdx = Math.min(simIndex + 1, routeCoords.length - 1);
                     heading = bearing(routeCoords[simIndex], routeCoords[nextIdx]);
                 }
 
-                // 6. SEND DATA
                 const u = buildUpdatePacket(simIndex, false, speedKmh);
-                u.hdg = Math.round(heading * 10) / 10; // Force the smart heading
+                u.hdg = Math.round(heading * 10) / 10; 
                 
                 sendJsonString(JSON.stringify(u));
                 checkRouteUpdate(simIndex);
 
-                // Only log every 5 updates to prevent spamming the log box
-                if (simIndex % 5 === 0) {
-                    log(`LIVE GPS: idx=${simIndex} spd=${speedKmh.toFixed(1)}km/h acc=${Math.round(accuracy)}m`);
-                }
+                if (simIndex % 5 === 0) { log(`LIVE GPS: idx=${simIndex} spd=${speedKmh.toFixed(1)}km/h acc=${Math.round(accuracy)}m`); }
             },
-            (err) => {
-                log("GPS Error: " + err.message);
-            },
-            { 
-                enableHighAccuracy: true, // Forces actual GPS satellite lock, not just Wi-Fi
-                maximumAge: 0,            // Never use cached old positions
-                timeout: 15000            // Give the GPS chip 15 seconds to lock on
-            }
+            (err) => { log("GPS Error: " + err.message); },
+            { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
         );
     });
 
@@ -505,12 +469,15 @@
             simIndex = 0; 
             measured = tgt * 3.6; 
             simSpdSmooth = measured;
-            
-            // --- THE FIX: Reset chunk tracker and send the first map again ---
             currentChunkEndIndex = 0; 
             sendNextChunk(0); 
+          } else {
+            nd=ndRaw;
+            let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;
+            measured=(Math.abs(nd-simDistM)/dt)*3.6;
+            simSpdSmooth+=(measured-simSpdSmooth)*0.3;
+            simIndex=ni;
           }
-          else{nd=ndRaw;let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;measured=(Math.abs(nd-simDistM)/dt)*3.6;simSpdSmooth+=(measured-simSpdSmooth)*0.3;simIndex=ni;}
           simDistM=nd;
           
           const u=buildUpdatePacket(simIndex,false,simSpdSmooth);
@@ -520,9 +487,9 @@
         }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
       },400);
     });
-        // Update slider text live
+
     document.getElementById('simSpeedMult').addEventListener('input', function() {
-    document.getElementById('speedMultVal').innerText = this.value;
+        document.getElementById('speedMultVal').innerText = this.value;
     });
   </script>
 </body>
