@@ -90,7 +90,12 @@
     </div>
 
     <button id="btnSendOnce">3. Send Once to ESP32</button>
+    <div class="panel" style="padding: 8px;">
+      <label style="margin-top:0; font-size: 12px;"> Simulation Speed: <span id="speedMultVal" style="color:#ea580c; font-weight:bold;">10</span>x</label>
+      <input type="range" id="simSpeedMult" min="1" max="50" value="10" style="width: 100%; margin-top: 4px;">
+    </div>
     <button id="btnSimulate">4. Simulate Ride (Fake)</button>
+    <button id="btnSimulate">4. Simulate Ride (Fake)</button>  <!-- DELETE THIS DUPLICATE LINE -->
     <button id="btnLiveRide" style="background:#10b981; display:none;">5. Start Live GPS Ride</button>
 
     <div id="logs">Ready...</div>
@@ -492,7 +497,8 @@
         if(sending)return;sending=true;
         try{
           const now=performance.now();let dt=(now-simLastTs)/1000;simLastTs=now;dt=clamp(dt,0.05,0.6);
-          const total=routeCumulative[routeCumulative.length-1]||1, tgt=plannedSpeedKmh(simIndex)/3.6;
+          const speedMult = parseFloat(document.getElementById('simSpeedMult').value) || 10;
+          const total=routeCumulative[routeCumulative.length-1]||1, tgt=(plannedSpeedKmh(simIndex)/3.6) * speedMult;
           const ndRaw=simDistM+tgt*dt;
           let nd,measured;
           if(ndRaw>=total){nd=0;simIndex=0;measured=tgt*3.6;simSpdSmooth=measured;}
@@ -505,6 +511,10 @@
           log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);
         }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
       },400);
+    });
+        // Update slider text live
+    document.getElementById('simSpeedMult').addEventListener('input', function() {
+    document.getElementById('speedMultVal').innerText = this.value;
     });
   </script>
 </body>
