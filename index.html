@@ -500,7 +500,16 @@
           const total=routeCumulative[routeCumulative.length-1]||1, tgt=(plannedSpeedKmh(simIndex)/3.6) * speedMult;
           const ndRaw=simDistM+tgt*dt;
           let nd,measured;
-          if(ndRaw>=total){nd=0;simIndex=0;measured=tgt*3.6;simSpdSmooth=measured;}
+          if(ndRaw >= total) {
+            nd = 0; 
+            simIndex = 0; 
+            measured = tgt * 3.6; 
+            simSpdSmooth = measured;
+            
+            // --- THE FIX: Reset chunk tracker and send the first map again ---
+            currentChunkEndIndex = 0; 
+            sendNextChunk(0); 
+          }
           else{nd=ndRaw;let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;measured=(Math.abs(nd-simDistM)/dt)*3.6;simSpdSmooth+=(measured-simSpdSmooth)*0.3;simIndex=ni;}
           simDistM=nd;
           
