@@ -19,8 +19,6 @@
     input,select{width:100%;padding:9px;margin-top:4px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box;}
     #logs{height:170px;overflow-y:auto;background:#111827;color:#22c55e;font-family:monospace;font-size:11px;padding:8px;border-radius:8px;margin-top:10px;}
     .hint{font-size:12px;color:#4b5563;margin-top:6px;}
-    
-    /* New styles for Search and Location */
     .search-container { display: flex; gap: 8px; margin-bottom: 8px; }
     .search-container input { flex: 1; margin-top: 0; }
     .search-container button { width: auto; margin: 0; padding: 9px 15px; background: #0ea5e9; }
@@ -36,7 +34,6 @@
     <h2>Bike Nav ESP32 Controller</h2>
     <div id="status">Disconnected</div>
 
-    <!-- NEW: Search Bar -->
     <div class="panel" style="margin-bottom:8px;">
       <label style="margin-top:0; margin-bottom:5px;">🔍 Find Location</label>
       <div class="search-container">
@@ -47,7 +44,6 @@
       <div class="hint">Click a result to zoom the map. Then click on the map to set START/END.</div>
     </div>
 
-    <!-- NEW: Current Location Button -->
     <button id="btnMyLocation">📍 Use My Current Location as START</button>
 
     <div class="panel" style="margin-bottom:8px;">
@@ -109,8 +105,15 @@
     let startMarker=null,endMarker=null,routeLine=null;
     let routeCoords=[],routeCumulative=[];
     let simTimer=null,simIndex=0,sending=false;
-    let simDistM=0,simLastTs=0,simSpdSmooth=0,routeSent=false;
+    let simDistM=0,simLastTs=0,simSpdSmooth=0;
     let tileLayer=null;
+
+    // --- SLIDING WINDOW PROTOCOL VARIABLES ---
+    const CHUNK_SIZE = 46;       // Max points ESP32 can handle smoothly
+    const OVERLAP_POINTS = 5;    // Overlap to prevent rider falling off edge
+    const TRIGGER_THRESHOLD = 30; // Send next chunk when rider passes this index
+    let fullRoutePoints = [];    // Stores the high-res full route
+    let currentChunkEndIndex = 0; // Tracks how far we have sent
 
     const statusDiv=document.getElementById("status"),logDiv=document.getElementById("logs");
     const btnConnect=document.getElementById("btnConnect"),btnDisconnect=document.getElementById("btnDisconnect");
@@ -140,95 +143,54 @@
     document.getElementById("cartoKey").addEventListener("change",applyMapStyle);
     applyMapStyle();
 
-    // --- Map Click Logic ---
     map.on("click",function(e){
       if(!startMarker){startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Start point set.");}
       else if(!endMarker){endMarker=L.marker(e.latlng).addTo(map).bindPopup("END");log("End point set. Fetch route now.");}
       else{resetRoute();startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Reset. New start point set.");}
     });
-    function resetRoute(){if(startMarker)map.removeLayer(startMarker);if(endMarker)map.removeLayer(endMarker);if(routeLine)map.removeLayer(routeLine);startMarker=endMarker=routeLine=null;routeCoords=[];routeCumulative=[];routeSent=false;stopSimulation();}
+    function resetRoute(){if(startMarker)map.removeLayer(startMarker);if(endMarker)map.removeLayer(endMarker);if(routeLine)map.removeLayer(routeLine);startMarker=endMarker=routeLine=null;routeCoords=[];routeCumulative=[];stopSimulation();}
 
-    // --- NEW: Search Bar Logic (Nominatim API) ---
     document.getElementById('btnSearch').addEventListener('click', async () => {
       const query = document.getElementById('searchInput').value.trim();
       if (!query) return;
-      
       log(`Searching for "${query}"...`);
       const resDiv = document.getElementById('searchResults');
       resDiv.innerHTML = '<div class="hint">Searching...</div>';
-
       try {
-        // Nominatim requires a User-Agent, but browsers handle this. Limit to 5 results.
         const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
         const data = await res.json();
-        
         resDiv.innerHTML = "";
-        if (data.length === 0) {
-          resDiv.innerHTML = '<div class="hint">No results found. Try a different name.</div>';
-          return;
-        }
-
+        if (data.length === 0) { resDiv.innerHTML = '<div class="hint">No results found.</div>'; return; }
         data.forEach(item => {
           const div = document.createElement('div');
           div.className = 'search-item';
           div.innerText = item.display_name;
           div.onclick = () => {
-            const lat = parseFloat(item.lat);
-            const lon = parseFloat(item.lon);
-            map.setView([lat, lon], 16); // Zoom in to the location
+            const lat = parseFloat(item.lat); const lon = parseFloat(item.lon);
+            map.setView([lat, lon], 16);
             log(`Map moved to: ${item.display_name.substring(0, 40)}...`);
-            resDiv.innerHTML = ""; // Clear results
+            resDiv.innerHTML = "";
           };
           resDiv.appendChild(div);
         });
-      } catch (err) {
-        resDiv.innerHTML = '<div class="hint">Search failed. Check internet.</div>';
-        log("Search error: " + err.message);
-      }
+      } catch (err) { resDiv.innerHTML = '<div class="hint">Search failed.</div>'; log("Search error: " + err.message); }
     });
+    document.getElementById('searchInput').addEventListener('keypress', function (e) { if (e.key === 'Enter') document.getElementById('btnSearch').click(); });
 
-    // Allow pressing "Enter" in the search box
-    document.getElementById('searchInput').addEventListener('keypress', function (e) {
-      if (e.key === 'Enter') document.getElementById('btnSearch').click();
-    });
-
-    // --- NEW: Current Location Logic ---
     document.getElementById('btnMyLocation').addEventListener('click', () => {
-      if (!navigator.geolocation) {
-        alert("Geolocation is not supported by your browser.");
-        return;
-      }
-      
+      if (!navigator.geolocation) { alert("Geolocation is not supported."); return; }
       log("Requesting current location...");
       const btn = document.getElementById('btnMyLocation');
-      btn.innerText = "Locating...";
-      btn.disabled = true;
-
+      btn.innerText = "Locating..."; btn.disabled = true;
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const lat = pos.coords.latitude;
-          const lon = pos.coords.longitude;
-          
+          const lat = pos.coords.latitude; const lon = pos.coords.longitude;
           map.setView([lat, lon], 16);
-          
-          if (!startMarker) {
-            startMarker = L.marker([lat, lon]).addTo(map).bindPopup("START (My Location)").openPopup();
-            log("START set to your current location.");
-          } else {
-            startMarker.setLatLng([lat, lon]);
-            startMarker.setPopupContent("START (My Location)").openPopup();
-            log("START updated to your current location.");
-          }
-          
-          btn.innerText = "📍 Use My Current Location as START";
-          btn.disabled = false;
+          if (!startMarker) { startMarker = L.marker([lat, lon]).addTo(map).bindPopup("START (My Location)").openPopup(); log("START set to current location."); }
+          else { startMarker.setLatLng([lat, lon]); startMarker.setPopupContent("START (My Location)").openPopup(); log("START updated to current location."); }
+          btn.innerText = " Use My Current Location as START"; btn.disabled = false;
         },
-        (err) => {
-          log("Location error: " + err.message);
-          alert("Could not get location. Ensure you are using HTTPS or localhost, and allow location permissions.");
-          btn.innerText = "📍 Use My Current Location as START";
-          btn.disabled = false;
-        },
+        (err) => { log("Location error: " + err.message); alert("Could not get location."); btn.innerText = "📍 Use My Current Location as START"; btn.disabled = false; },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     });
@@ -236,7 +198,7 @@
     function log(m){const t=new Date().toLocaleTimeString();logDiv.innerHTML+=`[${t}] ${m}<br>`;logDiv.scrollTop=logDiv.scrollHeight;}
     function setStatus(t,c){statusDiv.innerText=t;statusDiv.style.color=c?"#16a34a":"#dc2626";}
 
-    btnConnect.addEventListener("click",async()=>{try{log("Requesting device...");device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});log(`Connecting to ${device.name||"?"}...`);server=await device.gatt.connect();const s=await server.getPrimaryService(SERVICE_UUID);characteristic=await s.getCharacteristic(CHARACTERISTIC_UUID);setStatus("CONNECTED",true);btnConnect.style.display="none";btnDisconnect.style.display="block";routeSent=false;log("BLE connected.");}catch(e){log("BLE fail: "+e.message);alert("Connection failed: "+e.message);}});
+    btnConnect.addEventListener("click",async()=>{try{log("Requesting device...");device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});log(`Connecting to ${device.name||"?"}...`);server=await device.gatt.connect();const s=await server.getPrimaryService(SERVICE_UUID);characteristic=await s.getCharacteristic(CHARACTERISTIC_UUID);setStatus("CONNECTED",true);btnConnect.style.display="none";btnDisconnect.style.display="block";log("BLE connected.");}catch(e){log("BLE fail: "+e.message);alert("Connection failed: "+e.message);}});
     btnDisconnect.addEventListener("click",()=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect();setStatus("DISCONNECTED",false);btnConnect.style.display="block";btnDisconnect.style.display="none";stopSimulation();log("Disconnected.");});
 
     // --- SERIALIZED BLE WRITER ---
@@ -277,6 +239,37 @@
       });
     }
 
+    // --- SLIDING WINDOW FUNCTIONS ---
+    function initializeSlidingWindow(routeData) {
+        fullRoutePoints = routeData;
+        currentChunkEndIndex = 0;
+        sendNextChunk(0); 
+    }
+
+    function sendNextChunk(riderIndex) {
+        let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
+        let endIdx = startIdx + CHUNK_SIZE;
+        if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
+
+        if (endIdx > currentChunkEndIndex) {
+            let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
+            let packet = {
+                t: "R",
+                pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)])
+            };
+            sendJsonString(JSON.stringify(packet));
+            currentChunkEndIndex = endIdx;
+            log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
+        }
+    }
+
+    function checkRouteUpdate(riderIndex) {
+        let pointsRemainingInChunk = currentChunkEndIndex - riderIndex;
+        if (pointsRemainingInChunk <= (CHUNK_SIZE - TRIGGER_THRESHOLD)) {
+            sendNextChunk(riderIndex);
+        }
+    }
+
     function toRad(d){return d*Math.PI/180;} function toDeg(r){return r*180/Math.PI;}
     function round6(v){return Math.round(v*1e6)/1e6;} function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
     function haversine(p1,p2){const R=6371000,dLa=toRad(p2.lat-p1.lat),dLo=toRad(p2.lon-p1.lon);const a=Math.sin(dLa/2)**2+Math.cos(toRad(p1.lat))*Math.cos(toRad(p2.lat))*Math.sin(dLo/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
@@ -289,12 +282,10 @@
     function dedupe(p){const o=[];for(const q of p){const l=o[o.length-1];if(!l||l.lat!==q.lat||l.lon!==q.lon)o.push(q);}return o;}
     function drawRoute(col){if(!routeCoords.length)return;if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col||"blue",weight:5}).addTo(map);map.fitBounds(routeLine.getBounds());}
     function ensureRoute(){if(routeCoords.length){if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);return true;}if(startMarker&&endMarker){const s=startMarker.getLatLng(),e=endMarker.getLatLng();routeCoords=generateSimpleRoute(s,e,50);routeCumulative=computeCum(routeCoords);drawRoute("green");log("Fallback route generated.");return true;}return false;}
-    function downsample(c,maxN){const n=c.length; if(n<=maxN) return c.slice();const req=new Set([0,n-1]);let iMinLa=0,iMaxLa=0,iMinLo=0,iMaxLo=0;for(let i=1;i<n;i++){if(c[i].lat<c[iMinLa].lat)iMinLa=i; if(c[i].lat>c[iMaxLa].lat)iMaxLa=i;if(c[i].lon<c[iMinLo].lon)iMinLo=i; if(c[i].lon>c[iMaxLo].lon)iMaxLo=i;}req.add(iMinLa);req.add(iMaxLa);req.add(iMinLo);req.add(iMaxLo);const extra=Math.max(1,maxN-req.size), idx=[...req];for(let k=0;k<extra;k++) idx.push(Math.round(k*(n-1)/(extra-1||1)));const uniq=[...new Set(idx)].sort((a,b)=>a-b);return uniq.map(i=>c[i]);}
     function plannedSpeedKmh(i){if(routeCoords.length<3)return 18;let sh=0;for(let k=i;k<Math.min(i+6,routeCoords.length-2);k++){const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>25){sh=Math.min(1,(d-25)/60);break;}}return Math.round((22-(22-9)*sh)*10)/10;}
     function estimateDistanceToTurn(i){if(routeCoords.length<3)return 100;if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);let cum=0;for(let k=i;k<routeCoords.length-2;k++){cum+=haversine(routeCoords[k],routeCoords[k+1]);const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>30)return Math.max(20,Math.round(cum));}return Math.max(20,Math.round((routeCumulative[routeCumulative.length-1]-routeCumulative[i])||100));}
     function estimateTurnType(i){if(routeCoords.length<3)return 0;for(let k=i;k<routeCoords.length-2;k++){const d=angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2]));if(d<-150||d>150)return 5;if(d<-30)return 1;if(d>30)return 2;}return 0;}
 
-    function buildRoutePacket(){const ds=downsample(routeCoords,48);return {t:"R",pts:ds.map(p=>[round6(p.lat),round6(p.lon)])};}
     function buildUpdatePacket(index,manual,spdMeasured){
       const ov=document.getElementById("manualOverride").checked, em=manual&&ov;
       if(!ensureRoute()){const c=map.getCenter();return {t:"U",lat:round6(c.lat),lon:round6(c.lng),hdg:45,spd:em?parseFloat(document.getElementById("speedInput").value||18):(spdMeasured!=null?spdMeasured:18),dist:em?parseInt(document.getElementById("distInput").value||150):150,turn:em?parseInt(document.getElementById("turnInput").value||0):0,road:em?sanitizeRoad(document.getElementById("roadInput").value):"Fake Route"};}
@@ -304,7 +295,6 @@
       else{dist=estimateDistanceToTurn(si);turn=estimateTurnType(si);spd=(spdMeasured!=null)?spdMeasured:plannedSpeedKmh(si);road=sanitizeRoad(r.name||"Route");}
       return {t:"U",lat:round6(r.lat),lon:round6(r.lon),hdg:Math.round(hdg*10)/10,spd:Math.round(spd*10)/10,dist,turn,road};
     }
-    async function sendRouteOnce(){if(!characteristic||!server||!server.connected){log("Not connected — route will send on next Connect+Fetch.");return false;}await sendJsonString(JSON.stringify(buildRoutePacket()));routeSent=true;log("ROUTE (full path) sent to ESP32.");return true;}
 
     btnFetchRoute.addEventListener("click",async()=>{
       if(!startMarker||!endMarker){alert("Set START and END first.");return;}
@@ -337,15 +327,53 @@
 
       if(ex){routeCoords=ex.coords;log(`Route: ${routeCoords.length} pts, ${(ex.distanceM/1000).toFixed(2)} km`);if(ex.distanceM>straight*4&&ex.distanceM>2000){log("Route unrealistically long -> fallback.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}else drawRoute("blue");}
       else{log("All routers failed -> generated fallback route.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}
-      routeCumulative=computeCum(routeCoords);simIndex=0;routeSent=false;
+      routeCumulative=computeCum(routeCoords);simIndex=0;
       log(`Route stored: ${routeCoords.length} pts`);
-      if(characteristic&&server&&server.connected){try{ await sendRouteOnce(); }catch(e2){ log("Auto route-send deferred: "+e2.message); }}
+      
+      // --- SLIDING WINDOW INIT ---
+      if(characteristic&&server&&server.connected){
+          initializeSlidingWindow(routeCoords);
+      }
     });
 
-    btnSendOnce.addEventListener("click",async()=>{if(!characteristic||!server||!server.connected){alert("Connect first.");return;}try{if(!routeSent)await sendRouteOnce();await sleep(60);const u=buildUpdatePacket(0,true);await sendJsonString(JSON.stringify(u));const usingOv=document.getElementById("manualOverride").checked;log(`${usingOv?"UPDATE (override)":"UPDATE (route)"}: dist=${u.dist} turn=${u.turn} road="${u.road}" spd=${u.spd}`);}catch(e){ log("Send error (retried, will recover on next tap): "+e.message); }});
+    btnSendOnce.addEventListener("click",async()=>{
+        if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
+        if(fullRoutePoints.length === 0 && routeCoords.length > 0) initializeSlidingWindow(routeCoords);
+        sendNextChunk(0);
+        log("Sent initial map chunk.");
+    });
 
     function stopSimulation(){if(simTimer){clearInterval(simTimer);simTimer=null;}btnSimulate.innerText="4. Simulate Ride";log("Simulation stopped.");}
-    btnSimulate.addEventListener("click",async()=>{if(!characteristic||!server||!server.connected){alert("Connect first.");return;}if(!ensureRoute()){alert("Set START/END and Fetch Route first.");return;}if(simTimer){stopSimulation();return;}try{ await sendRouteOnce(); }catch(e){ log("Route pre-send retried inline: "+e.message); }await sleep(80);simIndex=0;simDistM=0;simSpdSmooth=0;simLastTs=performance.now();btnSimulate.innerText="Stop Simulation";log("Simulation started (measured speed).");simTimer=setInterval(async()=>{if(sending)return;sending=true;try{const now=performance.now();let dt=(now-simLastTs)/1000;simLastTs=now;dt=clamp(dt,0.05,0.6);const total=routeCumulative[routeCumulative.length-1]||1, tgt=plannedSpeedKmh(simIndex)/3.6;const ndRaw=simDistM+tgt*dt;let nd,measured;if(ndRaw>=total){nd=0;simIndex=0;measured=tgt*3.6;simSpdSmooth=measured;}else{nd=ndRaw;let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;measured=(Math.abs(nd-simDistM)/dt)*3.6;simSpdSmooth+=(measured-simSpdSmooth)*0.3;simIndex=ni;}simDistM=nd;const u=buildUpdatePacket(simIndex,false,simSpdSmooth);await sendJsonString(JSON.stringify(u));log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);}catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}},400);});
+    btnSimulate.addEventListener("click",async()=>{
+      if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
+      if(!ensureRoute()){alert("Set START/END and Fetch Route first.");return;}
+      if(simTimer){stopSimulation();return;}
+      
+      if(fullRoutePoints.length === 0) initializeSlidingWindow(routeCoords);
+      
+      simIndex=0;simDistM=0;simSpdSmooth=0;simLastTs=performance.now();
+      btnSimulate.innerText="Stop Simulation";log("Simulation started (measured speed).");
+      simTimer=setInterval(async()=>{
+        if(sending)return;sending=true;
+        try{
+          const now=performance.now();let dt=(now-simLastTs)/1000;simLastTs=now;dt=clamp(dt,0.05,0.6);
+          const total=routeCumulative[routeCumulative.length-1]||1, tgt=plannedSpeedKmh(simIndex)/3.6;
+          const ndRaw=simDistM+tgt*dt;
+          let nd,measured;
+          if(ndRaw>=total){nd=0;simIndex=0;measured=tgt*3.6;simSpdSmooth=measured;}
+          else{nd=ndRaw;let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;measured=(Math.abs(nd-simDistM)/dt)*3.6;simSpdSmooth+=(measured-simSpdSmooth)*0.3;simIndex=ni;}
+          simDistM=nd;
+          
+          const u=buildUpdatePacket(simIndex,false,simSpdSmooth);
+          await sendJsonString(JSON.stringify(u));
+          
+          // --- CHECK FOR NEXT MAP CHUNK ---
+          checkRouteUpdate(simIndex);
+          
+          log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);
+        }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
+      },400);
+    });
   </script>
 </body>
 </html>
