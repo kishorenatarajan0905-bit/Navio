@@ -247,21 +247,24 @@
     }
 
     function sendNextChunk(riderIndex) {
-        let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
-        let endIdx = startIdx + CHUNK_SIZE;
-        if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
+       let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
+       let endIdx = startIdx + CHUNK_SIZE;
+       if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
 
-        if (endIdx > currentChunkEndIndex) {
-            let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
-            let packet = {
-                t: "R",
-                pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)])
-            };
-            sendJsonString(JSON.stringify(packet));
-            currentChunkEndIndex = endIdx;
-            log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
-        }
-    }
+       if (endIdx > currentChunkEndIndex) {
+           let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
+           let packet = {
+               t: "R",
+               pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)])
+           };
+           // CHANGE THIS LINE TO RETURN THE PROMISE:
+           return sendJsonString(JSON.stringify(packet)).then(() => {
+               currentChunkEndIndex = endIdx;
+               log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
+           });
+       }
+       return Promise.resolve();
+   }
 
     function checkRouteUpdate(riderIndex) {
         let pointsRemainingInChunk = currentChunkEndIndex - riderIndex;
@@ -336,12 +339,28 @@
       }
     });
 
-    btnSendOnce.addEventListener("click",async()=>{
-        if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
-        if(fullRoutePoints.length === 0 && routeCoords.length > 0) initializeSlidingWindow(routeCoords);
-        sendNextChunk(0);
-        log("Sent initial map chunk.");
-    });
+       btnSendOnce.addEventListener("click",async()=>{
+       if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
+       try {
+           // 1. Initialize the sliding window if we haven't yet
+           if(fullRoutePoints.length === 0 && routeCoords.length > 0) {
+               initializeSlidingWindow(routeCoords);
+           }
+           
+           // 2. Send the map chunk and WAIT for it
+           await sendNextChunk(0);
+           log("Sent initial map chunk.");
+
+           // 3. Send a position update immediately so ESP32 switches to LIVE mode
+           if(routeCoords.length > 0) {
+               const u = buildUpdatePacket(0, false, 0); // 0 speed for initial lock
+               await sendJsonString(JSON.stringify(u));
+               log("Sent initial position update to switch to LIVE mode.");
+           }
+       } catch(e) {
+           log("Send Once error: " + e.message);
+       }
+   });
 
     function stopSimulation(){if(simTimer){clearInterval(simTimer);simTimer=null;}btnSimulate.innerText="4. Simulate Ride";log("Simulation stopped.");}
     btnSimulate.addEventListener("click",async()=>{
