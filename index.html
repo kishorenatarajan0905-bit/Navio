@@ -70,6 +70,19 @@ button{padding:8px 10px;border-radius:10px;font-size:13px}
 input,select{padding:7px;font-size:13px}label{margin:6px 0 3px}
 #logs{height:90px}
 @media(min-width:700px){.sheet{left:12px;right:auto;bottom:12px;width:290px;margin:0;border-radius:16px;max-height:62vh}}
+
+/* collapsed dock */
+.dock{display:none;gap:6px}
+.dock button{width:42px;height:42px;padding:0;display:grid;place-items:center;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:12px;position:relative}
+.dock svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.dock button.on::after{content:"";position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--go)}
+.dock button.dim{opacity:.5}
+.dock button.live{background:var(--stop);color:#fff;border-color:var(--stop)}
+.sheet.min>:not(.dock){display:none}
+.sheet.min>.dock{display:flex}
+.riding .sheet.min>#hud{display:block;min-width:250px}
+.sheet.min{padding:6px;left:50%;right:auto;bottom:max(12px,env(safe-area-inset-bottom));transform:translateX(-50%);width:auto;max-width:96vw;margin:0;border-radius:16px;overflow:visible}
+@media(min-width:700px){.sheet.min{left:12px;transform:none;bottom:12px;width:auto}}
 </style>
 </head>
 <body>
@@ -86,7 +99,7 @@ input,select{padding:7px;font-size:13px}label{margin:6px 0 3px}
 
 <div class="toast" id="toast" role="status"></div>
 
-<div class="sheet" id="sheet">
+<div class="sheet min" id="sheet">
   <div class="head"><span id="headTxt">Bike Nav</span><button class="min-btn" id="minBtn" aria-label="Collapse or expand panel" title="Collapse / expand">&#8212;</button></div>
 
   <div id="plan">
@@ -126,6 +139,12 @@ input,select{padding:7px;font-size:13px}label{margin:6px 0 3px}
     <div class="hud"><div id="hArrow">&uarr;</div><div id="hDist">-</div><div id="hRoad">-</div></div>
     <div class="hstats"><div><b id="hSpd">0</b> km/h</div><div><b id="hLeft">-</b> left</div><div id="hSrc"></div></div>
     <button class="stop" id="stopBtn" style="width:100%">End ride</button>
+  </div>
+  <div class="dock" id="dock">
+    <button id="dBle" title="Connect bike" aria-label="Connect bike"><svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 5V2l5 5L7 17"/></svg></button>
+    <button id="dRoute" title="Get route" aria-label="Get route"><svg viewBox="0 0 24 24"><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 17V9a4 4 0 0 1 4-4h6"/></svg></button>
+    <button id="dRide" title="Start ride" aria-label="Start ride"><svg viewBox="0 0 24 24" id="dRideIco"><path d="M7 4l13 8-13 8z"/></svg></button>
+    <button id="dSet" title="Settings and details" aria-label="Open settings"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg></button>
   </div>
 </div>
 
@@ -178,7 +197,7 @@ map.on("click",e=>{
 
 function clearRoute(){if(routeLine)map.removeLayer(routeLine);routeLine=null;routeCoords=[];routeCum=[];fullPts=[];chunkEnd=0;routeDistM=0;$("sum").hidden=true}
 function clearAll(){[startM,endM].forEach(m=>m&&map.removeLayer(m));startM=endM=null;clearRoute();refresh()}
-function drawRoute(col){if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col,weight:6,opacity:.9}).addTo(map);map.fitBounds(routeLine.getBounds(),{paddingBottomRight:[20,innerWidth<700?220:20],paddingTopLeft:[innerWidth<700?20:320,80]})}
+function drawRoute(col){if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col,weight:6,opacity:.9}).addTo(map);map.fitBounds(routeLine.getBounds(),{paddingBottomRight:[20,$("sheet").classList.contains("min")?90:(innerWidth<700?220:20)],paddingTopLeft:[innerWidth<700||$("sheet").classList.contains("min")?20:320,80]})}
 $("clearBtn").onclick=clearAll;
 $("swapBtn").onclick=()=>{if(!startM||!endM)return toast("Set both pins first.");const a=startM.getLatLng();startM.setLatLng(endM.getLatLng());endM.setLatLng(a);clearRoute();refresh()};
 
@@ -194,7 +213,7 @@ function refresh(){
     :!endM?"Now tap your destination."
     :!has?"Pins set. Get the route to continue.":"Route ready. Choose a ride mode and start.";
   $("headTxt").textContent=routeCoords.length?`Route ready · ${fmtKm(routeDistM)}`:$("hint").textContent;
-  $("routeBtn").disabled=!(startM&&endM);
+  $("routeBtn").disabled=!(startM&&endM);updateDock();
   $("rideBtn").disabled=!(has&&c);
   $("bleBtn").classList.toggle("on",c);$("bleTxt").textContent=c?(device&&device.name||"Connected"):"Connect bike";
 }
@@ -302,12 +321,12 @@ function stopRide(silent){
   if(gpsMarker){map.removeLayer(gpsMarker);gpsMarker=null}
   if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null}
   if(document.body.classList.contains("riding")&&!silent)toast("Ride ended.");
-  document.body.classList.remove("riding")}
+  document.body.classList.remove("riding");updateDock()}
 $("stopBtn").onclick=()=>stopRide();
 $("rideBtn").onclick=()=>{
   if(!connected())return toast("Connect the bike first.");if(!routeCoords.length)return toast("Get a route first.");
   if(!fullPts.length)initWindow(routeCoords);
-  document.body.classList.add("riding");lockScreen();simIndex=0;
+  document.body.classList.add("riding");updateDock();lockScreen();simIndex=0;
   mode==="sim"?startSim():startLive()};
 
 function closestIdx(lat,lon,cur){let best=cur,min=Infinity;const a=Math.max(0,cur-20),b=Math.min(routeCoords.length,cur+150);
@@ -340,8 +359,22 @@ function startSim(){
       await sendJson(JSON.stringify(u));checkUpdate(simIndex)
     }catch(e){toast("Practice stopped: "+e.message);stopRide(true)}finally{sending=false}},400)}
 
-$("minBtn").onclick=()=>{const m=$("sheet").classList.toggle("min");$("minBtn").innerHTML=m?"&#9633;":"&#8212;"};
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&document.body.classList.contains("riding"))lockScreen()});
+/* dock */
+function updateDock(){
+  const r=document.body.classList.contains("riding"),c=connected(),has=routeCoords.length>0;
+  $("dBle").classList.toggle("on",c);$("dBle").title=c?"Disconnect bike":"Connect bike";
+  $("dRoute").classList.toggle("on",has);$("dRoute").classList.toggle("dim",!(startM&&endM)&&!has);
+  $("dRide").classList.toggle("live",r);$("dRide").classList.toggle("dim",!r&&!(has&&c));
+  $("dRide").title=r?"End ride":"Start ride";
+  $("dRideIco").innerHTML=r?'<rect x="6" y="6" width="12" height="12" rx="2"/>':'<path d="M7 4l13 8-13 8z"/>'}
+function expand(open){const m=!open;$("sheet").classList.toggle("min",m);$("minBtn").innerHTML=m?"&#9633;":"&#8212;"}
+$("dBle").onclick=()=>$("bleBtn").click();
+$("dRoute").onclick=()=>{if(!(startM&&endM))return toast("Tap the map to set a start, then a destination.");$("routeBtn").click()};
+$("dRide").onclick=()=>{if(document.body.classList.contains("riding"))return stopRide();$("rideBtn").onclick()};
+$("dSet").onclick=()=>expand(true);
+$("minBtn").onclick=()=>expand(false);
+updateDock();
 refresh();
 </script>
 </body>
