@@ -1,496 +1,328 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bike Nav ESP32 Controller</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <style>
-    body{font-family:Arial,sans-serif;margin:0;padding:12px;background:#f3f4f6;}
-    .container{max-width:650px;margin:auto;background:#fff;padding:14px;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.12);}
-    h2{margin:0 0 10px;text-align:center;color:#1f2937;}
-    #status{text-align:center;font-weight:bold;margin-bottom:10px;color:#dc2626;}
-    #map{height:320px;width:100%;border-radius:8px;margin-bottom:12px;}
-    button{width:100%;padding:12px;margin:5px 0;border:none;border-radius:8px;font-size:15px;cursor:pointer;color:#fff;}
-    #btnConnect{background:#16a34a;} #btnDisconnect{background:#dc2626;display:none;}
-    #btnFetchRoute{background:#2563eb;} #btnSendOnce{background:#7c3aed;} #btnSimulate{background:#ea580c;}
-    .panel{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px;margin:10px 0;}
-    label{display:block;margin-top:8px;font-weight:bold;font-size:13px;}
-    input,select{width:100%;padding:9px;margin-top:4px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box;}
-    #logs{height:170px;overflow-y:auto;background:#111827;color:#22c55e;font-family:monospace;font-size:11px;padding:8px;border-radius:8px;margin-top:10px;}
-    .hint{font-size:12px;color:#4b5563;margin-top:6px;}
-    .search-container { display: flex; gap: 8px; margin-bottom: 8px; }
-    .search-container input { flex: 1; margin-top: 0; }
-    .search-container button { width: auto; margin: 0; padding: 9px 15px; background: #0ea5e9; }
-    #searchResults { max-height: 120px; overflow-y: auto; margin-top: 5px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
-    .search-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-size: 12px; color: #374151; }
-    .search-item:hover { background: #f3f4f6; }
-    .search-item:last-child { border-bottom: none; }
-    #btnMyLocation { background: #059669; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14202b">
+<title>Bike Nav</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" onerror="this.onerror=null;this.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'">
+<style>
+:root{--ink:#14202b;--ink2:#1f2f3d;--paper:#f6f5f0;--line:#dcdad0;--mut:#69727a;--go:#12a150;--stop:#d92d20;--sig:#ff6a1f;--route:#0b7285;--r:14px}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0}
+body{font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--paper);overflow:hidden}
+#map{position:fixed;inset:0}
+button{font:inherit;cursor:pointer;border:0;border-radius:12px;padding:13px 14px;font-weight:600;background:var(--ink);color:#fff;transition:transform .08s,opacity .2s}
+button:active{transform:scale(.98)}button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--sig);outline-offset:2px}
+button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+button.go{background:var(--go)}button.stop{background:var(--stop)}button.sig{background:var(--sig)}
+input,select{font:inherit;width:100%;padding:11px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
+/* top bar */
+.top{position:fixed;top:max(10px,env(safe-area-inset-top));left:10px;right:10px;z-index:900;display:flex;gap:8px;max-width:560px;margin:auto}
+.search{flex:1;position:relative}
+.search input{padding:13px 14px;border:0;box-shadow:0 2px 12px rgba(20,32,43,.25);border-radius:12px}
+#results{position:absolute;top:100%;left:0;right:0;margin-top:6px;background:#fff;border-radius:12px;box-shadow:0 4px 18px rgba(20,32,43,.25);overflow:hidden;max-height:40vh;overflow-y:auto}
+#results div{padding:11px 14px;border-bottom:1px solid #eee;cursor:pointer;font-size:13px}
+#results div:hover{background:#f2f4f5}#results .none{color:var(--mut);cursor:default}
+.pill{display:flex;align-items:center;gap:7px;background:#fff;border-radius:12px;padding:0 13px;box-shadow:0 2px 12px rgba(20,32,43,.25);font-weight:600;font-size:13px;white-space:nowrap;border:0;color:var(--ink)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--stop)}.pill.on .dot{background:var(--go)}
+.fab{position:fixed;right:10px;z-index:800;width:46px;height:46px;padding:0;background:#fff;color:var(--ink);box-shadow:0 2px 12px rgba(20,32,43,.25);font-size:20px}
+/* sheet */
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:1000;background:var(--paper);border-radius:20px 20px 0 0;box-shadow:0 -6px 30px rgba(20,32,43,.3);padding:8px 14px max(14px,env(safe-area-inset-bottom));max-width:560px;margin:auto;max-height:70vh;overflow-y:auto}
+.grip{width:40px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 10px}
+.steps{display:flex;gap:6px;margin-bottom:10px}
+.step{flex:1;font-size:12px;color:var(--mut);padding:6px 8px;border-radius:8px;background:#ebeae2;text-align:center}
+.step.done{background:#d9f2e3;color:#0b6b35}.step.now{background:var(--ink);color:#fff}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.msg{color:var(--mut);margin:0 0 10px}
+.sum{display:flex;gap:18px;margin:0 0 10px}.sum b{font-size:22px;display:block}.sum span{font-size:12px;color:var(--mut)}
+.seg{display:flex;background:#ebeae2;border-radius:12px;padding:3px;margin-bottom:10px}
+.seg button{background:none;color:var(--mut);padding:10px}.seg button.act{background:#fff;color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.15)}
+details{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}summary{cursor:pointer;font-weight:600;padding:6px 0}
+label{display:block;font-size:12px;font-weight:600;margin:10px 0 4px;color:var(--mut)}
+.chk{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--ink);font-weight:500}.chk input{width:auto}
+#logs{height:130px;overflow-y:auto;background:var(--ink);color:#7ee2a8;font:11px/1.5 ui-monospace,Menlo,monospace;padding:8px;border-radius:10px;margin-top:10px}
+/* ride HUD */
+#hud{display:none}.riding #hud{display:block}.riding #plan{display:none}
+.hud{background:var(--ink);color:#fff;border-radius:16px;padding:14px;display:grid;grid-template-columns:auto 1fr;gap:4px 16px;align-items:center;margin-bottom:10px}
+#hArrow{font-size:60px;line-height:1;grid-row:span 2;width:80px;text-align:center;color:var(--sig)}
+#hDist{font-size:34px;font-weight:700}#hRoad{color:#b9c4cc;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hstats{display:flex;justify-content:space-between;margin-bottom:10px;font-size:13px;color:var(--mut)}.hstats b{color:var(--ink);font-size:18px}
+.mk{width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.toast{position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:1200;background:var(--ink);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .25s}.toast.show{opacity:1}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
 </head>
 <body>
-  <div class="container">
-    <h2>Bike Nav ESP32 Controller</h2>
-    <div id="status">Disconnected</div>
+<div id="map"></div>
 
-    <div class="panel" style="margin-bottom:8px;">
-      <label style="margin-top:0; margin-bottom:5px;">🔍 Find Location</label>
-      <div class="search-container">
-        <input type="text" id="searchInput" placeholder="Type location (e.g., College Gate, Park)..." />
-        <button id="btnSearch">Search</button>
-      </div>
-      <div id="searchResults"></div>
-      <div class="hint">Click a result to zoom the map. Then click on the map to set START/END.</div>
+<div class="top">
+  <div class="search">
+    <input id="q" type="search" placeholder="Search a place" aria-label="Search a place" autocomplete="off">
+    <div id="results" hidden></div>
+  </div>
+  <button class="pill" id="bleBtn"><span class="dot"></span><span id="bleTxt">Connect bike</span></button>
+</div>
+<button class="fab" id="locBtn" style="top:calc(max(10px,env(safe-area-inset-top)) + 62px)" aria-label="Use my location as start" title="Use my location as start">&#9678;</button>
+
+<div class="toast" id="toast" role="status"></div>
+
+<div class="sheet" id="sheet">
+  <div class="grip"></div>
+
+  <div id="plan">
+    <div class="steps">
+      <div class="step" id="s1">1 Connect</div><div class="step" id="s2">2 Pick route</div><div class="step" id="s3">3 Ride</div>
     </div>
-
-    <button id="btnMyLocation">📍 Use My Current Location as START</button>
-
-    <div class="panel" style="margin-bottom:8px;">
-      <label style="margin-top:0;">Map style</label>
-      <select id="mapStyle">
-        <option value="esri" selected>Google-like streets (Esri, free, no key)</option>
-        <option value="google">Exact Google Maps (demo / learning only)</option>
-        <option value="osm">OpenStreetMap (free, no key)</option>
-        <option value="carto">CARTO Voyager (needs API key)</option>
-      </select>
-      <input type="text" id="cartoKey" placeholder="Paste CARTO API key here (CARTO style only)" style="display:none;margin-top:6px;" />
-      <div class="hint" id="mapHint"></div>
+    <p class="msg" id="hint">Tap the map to set your start, then tap again for your destination.</p>
+    <div class="sum" id="sum" hidden><div><b id="sumKm">-</b><span>distance</span></div><div><b id="sumMin">-</b><span>bike time</span></div><div><b id="sumPts">-</b><span>points</span></div></div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="ghost" id="swapBtn">Swap start/end</button>
+      <button class="ghost" id="clearBtn">Clear</button>
     </div>
-
-    <div id="map"></div>
-
-    <button id="btnConnect">1. Connect to ESP32</button>
-    <button id="btnDisconnect">Disconnect</button>
-
-    <div class="panel">
-      <strong>Map Instructions</strong>
-      <div class="hint">Click map once for START.<br/>Click map again for END.<br/>Click again to reset.<br/><br/>For best route results, click directly on visible roads.</div>
+    <button id="routeBtn" class="sig" style="width:100%;margin-bottom:10px">Get route</button>
+    <div class="seg" id="modeSeg"><button class="act" data-m="live">Live GPS ride</button><button data-m="sim">Practice (simulated)</button></div>
+    <div id="simBox" hidden>
+      <label>Practice speed: <span id="mv">10</span>x</label>
+      <input type="range" id="mult" min="1" max="50" value="10" style="padding:0">
     </div>
+    <button id="rideBtn" class="go" style="width:100%;margin-top:10px" disabled>Start ride</button>
 
-    <button id="btnFetchRoute">2. Fetch Route</button>
-
-    <div class="panel">
-      <label style="display:flex;align-items:center;gap:8px;margin-top:0;">
-        <input type="checkbox" id="manualOverride" style="width:auto;margin:0;" />
-        <span>Use manual override (testing only)</span>
-      </label>
-      <div class="hint">When OFF (default): distance, turn and road name come from the real route.<br/>When ON: the fields below force a specific arrow for testing.</div>
-      <label>Distance to turn (m)</label>
-      <input type="number" id="distInput" value="150" min="0" />
+    <details>
+      <summary>Advanced</summary>
+      <label>Map style</label>
+      <select id="mapStyle"><option value="esri">Streets (Esri)</option><option value="osm">OpenStreetMap</option><option value="google">Google tiles (demo only)</option></select>
+      <div class="row" style="margin-top:10px"><button class="ghost" id="resendBtn">Resend map to bike</button><button class="ghost" id="testBtn">Send test packet</button></div>
+      <label class="chk" style="margin-top:12px"><input type="checkbox" id="manualOverride"> Manual override (testing only)</label>
+      <label>Distance to turn (m)</label><input type="number" id="distInput" value="150" min="0">
       <label>Turn type</label>
-      <select id="turnInput">
-        <option value="0">Straight</option><option value="1">Left</option><option value="2">Right</option>
-        <option value="3">Slight Left</option><option value="4">Slight Right</option><option value="5">U-Turn</option><option value="6">Arrived</option>
-      </select>
-      <label>Speed (km/h)</label>
-      <input type="number" id="speedInput" value="18" min="0" />
-      <label>Road name</label>
-      <input type="text" id="roadInput" value="College Road" maxlength="20" />
-    </div>
-
-    <button id="btnSendOnce">3. Send Once to ESP32</button>
-    
-    <div class="panel" style="padding: 8px;">
-      <label style="margin-top:0; font-size: 12px;"> Simulation Speed: <span id="speedMultVal" style="color:#ea580c; font-weight:bold;">10</span>x</label>
-      <input type="range" id="simSpeedMult" min="1" max="50" value="10" style="width: 100%; margin-top: 4px;">
-    </div>
-    
-    <button id="btnSimulate">4. Simulate Ride (Fake)</button>
-    <button id="btnLiveRide" style="background:#10b981; display:none;">5. Start Live GPS Ride</button>
-
-    <div id="logs">Ready...</div>
+      <select id="turnInput"><option value="0">Straight</option><option value="1">Left</option><option value="2">Right</option><option value="3">Slight left</option><option value="4">Slight right</option><option value="5">U-turn</option><option value="6">Arrived</option></select>
+      <label>Speed (km/h)</label><input type="number" id="speedInput" value="18" min="0">
+      <label>Road name</label><input type="text" id="roadInput" value="College Road" maxlength="20">
+      <div id="logs">Ready.</div>
+    </details>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script>
-    const SERVICE_UUID="6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-    const CHARACTERISTIC_UUID="6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-    const GOOGLE_KEY = ""; 
+  <div id="hud">
+    <div class="hud"><div id="hArrow">&uarr;</div><div id="hDist">-</div><div id="hRoad">-</div></div>
+    <div class="hstats"><div><b id="hSpd">0</b> km/h</div><div><b id="hLeft">-</b> left</div><div id="hSrc"></div></div>
+    <button class="stop" id="stopBtn" style="width:100%">End ride</button>
+  </div>
+</div>
 
-    let device=null,server=null,characteristic=null;
-    let startMarker=null,endMarker=null,routeLine=null;
-    let routeCoords=[],routeCumulative=[];
-    let simTimer=null,simIndex=0,sending=false;
-    let simDistM=0,simLastTs=0,simSpdSmooth=0;
-    let tileLayer=null;
-    let rawGpsMarker = null;
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>if(typeof L==="undefined"){document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>')}</script>
+<script>
+const SERVICE_UUID="6e400001-b5a3-f393-e0a9-e50e24dcca9e",CHAR_UUID="6e400002-b5a3-f393-e0a9-e50e24dcca9e",GOOGLE_KEY="";
+const $=id=>document.getElementById(id);
+if(typeof L==="undefined"){document.getElementById("map").innerHTML='<div style="padding:90px 20px;text-align:center;font-weight:600">Map library could not load.<br><span style="font-weight:400;color:#69727a">Check your internet connection and open this file in Chrome or Edge from a normal web address (https:// or localhost).</span></div>';throw new Error("Leaflet not loaded")}
+let device=null,server=null,characteristic=null,startM=null,endM=null,routeLine=null,routeCoords=[],routeCum=[],routeDistM=0;
+let simTimer=null,simIndex=0,sending=false,simDistM=0,simLastTs=0,simSpd=0,tileLayer=null,gpsMarker=null,liveId=null,mode="live",wakeLock=null;
+const CHUNK=46,OVERLAP=5,TRIGGER=30;let fullPts=[],chunkEnd=0,chunkBusy=false;
+const ARROWS=["\u2191","\u2190","\u2192","\u2196","\u2197","\u21B6","\u2691"];
 
-    // --- SLIDING WINDOW PROTOCOL VARIABLES ---
-    const CHUNK_SIZE = 46;       
-    const OVERLAP_POINTS = 5;    
-    const TRIGGER_THRESHOLD = 30; 
-    let fullRoutePoints = [];    
-    let currentChunkEndIndex = 0; 
-    let isChunkSending = false; 
+/* ---------- helpers ---------- */
+function log(m){const l=$("logs");l.innerHTML+=`<br>[${new Date().toLocaleTimeString()}] ${m}`;l.scrollTop=l.scrollHeight}
+let tt;function toast(m){const t=$("toast");t.textContent=m;t.classList.add("show");clearTimeout(tt);tt=setTimeout(()=>t.classList.remove("show"),3000);log(m)}
+const toRad=d=>d*Math.PI/180,toDeg=r=>r*180/Math.PI,round6=v=>Math.round(v*1e6)/1e6,clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function haversine(p,q){const R=6371000,a=toRad(q.lat-p.lat),b=toRad(q.lon-p.lon),x=Math.sin(a/2)**2+Math.cos(toRad(p.lat))*Math.cos(toRad(q.lat))*Math.sin(b/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
+function bearing(p,q){const f1=toRad(p.lat),f2=toRad(q.lat),dl=toRad(q.lon-p.lon);return(toDeg(Math.atan2(Math.sin(dl)*Math.cos(f2),Math.cos(f1)*Math.sin(f2)-Math.sin(f1)*Math.cos(f2)*Math.cos(dl)))+360)%360}
+const angleDiff=(a,b)=>((b-a+540)%360)-180;
+const sanitizeRoad=t=>String(t||"").replace(/[^A-Za-z0-9 .,_-]/g,"").substring(0,20).trim()||"Route";
+const fmtKm=m=>m>=1000?(m/1000).toFixed(1)+" km":Math.round(m)+" m";
+function computeCum(c){const a=[0];for(let i=1;i<c.length;i++)a.push(a[i-1]+haversine(c[i-1],c[i]));return a}
+function dedupe(p){const o=[];for(const q of p){const l=o[o.length-1];if(!l||l.lat!==q.lat||l.lon!==q.lon)o.push(q)}return o}
 
-    // --- LIVE GPS VARIABLES ---
-    let liveWatchId = null;
-    const btnLiveRide = document.getElementById("btnLiveRide");
+/* ---------- map ---------- */
+const map=L.map("map",{zoomControl:false}).setView([11.0168,76.9558],14);
+L.control.zoom({position:"bottomright"}).addTo(map);
+function applyStyle(){
+  const s=$("mapStyle").value;if(tileLayer)map.removeLayer(tileLayer);
+  const c=s==="google"?["https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",{subdomains:["mt0","mt1","mt2","mt3"],maxZoom:20,attribution:"Google (demo only)"}]
+   :s==="osm"?["https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap"}]
+   :["https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",{maxZoom:19,attribution:"Tiles &copy; Esri"}];
+  tileLayer=L.tileLayer(c[0],c[1]).addTo(map);try{localStorage.setItem("bn_style",s)}catch(e){}
+}
+try{const s=localStorage.getItem("bn_style");if(s)$("mapStyle").value=s}catch(e){}
+$("mapStyle").onchange=applyStyle;applyStyle();
 
-    const statusDiv=document.getElementById("status"),logDiv=document.getElementById("logs");
-    const btnConnect=document.getElementById("btnConnect"),btnDisconnect=document.getElementById("btnDisconnect");
-    const btnFetchRoute=document.getElementById("btnFetchRoute"),btnSendOnce=document.getElementById("btnSendOnce"),btnSimulate=document.getElementById("btnSimulate");
+const pin=c=>L.divIcon({className:"",html:`<div class="mk" style="background:${c}"></div>`,iconSize:[26,26],iconAnchor:[6,26]});
+function makeMarker(ll,color,label){
+  const m=L.marker(ll,{icon:pin(color),draggable:true}).addTo(map).bindTooltip(label);
+  m.on("dragend",()=>{clearRoute();toast("Pin moved. Get the route again.");refresh()});return m}
+map.on("click",e=>{
+  if(document.body.classList.contains("riding"))return;
+  if(!startM)startM=makeMarker(e.latlng,"#12a150","Start");
+  else if(!endM)endM=makeMarker(e.latlng,"#d92d20","Destination");
+  else{clearAll();startM=makeMarker(e.latlng,"#12a150","Start")}
+  clearRoute();refresh()});
 
-    if(!navigator.bluetooth){alert("Web Bluetooth not supported. Use Chrome/Edge on Android or desktop.");btnConnect.disabled=true;}
+function clearRoute(){if(routeLine)map.removeLayer(routeLine);routeLine=null;routeCoords=[];routeCum=[];fullPts=[];chunkEnd=0;routeDistM=0;$("sum").hidden=true}
+function clearAll(){[startM,endM].forEach(m=>m&&map.removeLayer(m));startM=endM=null;clearRoute();refresh()}
+function drawRoute(col){if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col,weight:6,opacity:.9}).addTo(map);map.fitBounds(routeLine.getBounds(),{paddingBottomRight:[20,260],paddingTopLeft:[20,80]})}
+$("clearBtn").onclick=clearAll;
+$("swapBtn").onclick=()=>{if(!startM||!endM)return toast("Set both pins first.");const a=startM.getLatLng();startM.setLatLng(endM.getLatLng());endM.setLatLng(a);clearRoute();refresh()};
 
-    const map=L.map("map").setView([12.9716,77.5946],14);
-    function styleConfig(style,key){
-      if(style==="google")return{url:"https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",opts:{subdomains:["mt0","mt1","mt2","mt3"],maxZoom:20,attribution:"Map data &copy; Google — demo only"}};
-      if(style==="osm")return{url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png",opts:{maxZoom:19,attribution:"&copy; OpenStreetMap contributors"}};
-      if(style==="carto"){const base="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";return{url:key?base+"?api_key="+encodeURIComponent(key):base,opts:{subdomains:"abcd",maxZoom:19,attribution:"&copy; OpenStreetMap &copy; CARTO"}};}
-      return{url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",opts:{maxZoom:19,attribution:"Tiles &copy; Esri"}};
-    }
-    function applyMapStyle(){
-      const style=document.getElementById("mapStyle").value,key=document.getElementById("cartoKey").value.trim();
-      document.getElementById("cartoKey").style.display=style==="carto"?"block":"none";
-      const h=document.getElementById("mapHint");
-      h.innerHTML = style==="google" ? "Literal Google tiles — looks exactly like Google Maps, no key. <b>Note:</b> using Google tiles outside the Google Maps API violates Google's ToS — classroom demo only."
-                  : style==="carto" ? "CARTO Voyager. Paste your free CARTO API key above to remove the watermark (carto.com → Dashboard → API Keys)."
-                  : style==="osm" ? "Standard OpenStreetMap. Free, no key."
-                  : "Esri World Street Map. Free, no key, no watermark. Looks very similar to Google Maps. Recommended.";
-      if(tileLayer){map.removeLayer(tileLayer);tileLayer=null;}
-      const c=styleConfig(style,key); tileLayer=L.tileLayer(c.url,c.opts).addTo(map);
-    }
-    document.getElementById("mapStyle").addEventListener("change",applyMapStyle);
-    document.getElementById("cartoKey").addEventListener("change",applyMapStyle);
-    applyMapStyle();
+/* ---------- UI state ---------- */
+function connected(){return !!(characteristic&&server&&server.connected)}
+function refresh(){
+  const c=connected(),has=routeCoords.length>0;
+  $("s1").className="step "+(c?"done":"now");
+  $("s2").className="step "+(has?"done":c?"now":"");
+  $("s3").className="step "+(has&&c?"now":"");
+  $("hint").textContent=!c?"Connect your bike first, then plan the route."
+    :!startM?"Tap the map to set your start, or use the location button."
+    :!endM?"Now tap your destination."
+    :!has?"Pins set. Get the route to continue.":"Route ready. Choose a ride mode and start.";
+  $("routeBtn").disabled=!(startM&&endM);
+  $("rideBtn").disabled=!(has&&c);
+  $("bleBtn").classList.toggle("on",c);$("bleTxt").textContent=c?(device&&device.name||"Connected"):"Connect bike";
+}
+document.querySelectorAll("#modeSeg button").forEach(b=>b.onclick=()=>{mode=b.dataset.m;document.querySelectorAll("#modeSeg button").forEach(x=>x.classList.toggle("act",x===b));$("simBox").hidden=mode!=="sim"});
+$("mult").oninput=e=>$("mv").textContent=e.target.value;
 
-    map.on("click",function(e){
-      if(!startMarker){startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Start point set.");}
-      else if(!endMarker){endMarker=L.marker(e.latlng).addTo(map).bindPopup("END");log("End point set. Fetch route now.");}
-      else{resetRoute();startMarker=L.marker(e.latlng).addTo(map).bindPopup("START");log("Reset. New start point set.");}
-    });
-    function resetRoute(){
-      if(startMarker)map.removeLayer(startMarker);
-      if(endMarker)map.removeLayer(endMarker);
-      if(routeLine)map.removeLayer(routeLine);
-      if(rawGpsMarker)map.removeLayer(rawGpsMarker);
-      startMarker=endMarker=routeLine=rawGpsMarker=null;
-      routeCoords=[];routeCumulative=[];
-      stopSimulation();
-      if(liveWatchId) { navigator.geolocation.clearWatch(liveWatchId); liveWatchId=null; btnLiveRide.innerText="5. Start Live GPS Ride"; btnLiveRide.style.display="none"; }
-    }
+/* ---------- search & location ---------- */
+async function search(){
+  const q=$("q").value.trim(),r=$("results");if(!q)return;r.hidden=false;r.innerHTML='<div class="none">Searching...</div>';
+  try{const d=await(await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5`)).json();
+    r.innerHTML="";if(!d.length){r.innerHTML='<div class="none">No matches. Try a nearby landmark or a city name.</div>';return}
+    d.forEach(i=>{const e=document.createElement("div");e.textContent=i.display_name;e.onclick=()=>{map.setView([+i.lat,+i.lon],16);r.hidden=true;$("q").value=i.display_name.split(",")[0]};r.appendChild(e)})
+  }catch(err){r.innerHTML='<div class="none">Search failed. Check your connection and try again.</div>'}}
+$("q").addEventListener("keydown",e=>{if(e.key==="Enter")search()});
+$("q").addEventListener("input",()=>{if(!$("q").value)$("results").hidden=true});
+$("locBtn").onclick=()=>{
+  if(!navigator.geolocation)return toast("This browser has no location support.");
+  toast("Finding you...");
+  navigator.geolocation.getCurrentPosition(p=>{const ll=L.latLng(p.coords.latitude,p.coords.longitude);map.setView(ll,16);
+    if(!startM)startM=makeMarker(ll,"#12a150","Start");else startM.setLatLng(ll);clearRoute();refresh();toast("Start set to your location.")},
+    e=>toast("Could not get location: "+e.message),{enableHighAccuracy:true,timeout:10000,maximumAge:0})};
 
-    document.getElementById('btnSearch').addEventListener('click', async () => {
-      const query = document.getElementById('searchInput').value.trim();
-      if (!query) return;
-      log(`Searching for "${query}"...`);
-      const resDiv = document.getElementById('searchResults');
-      resDiv.innerHTML = '<div class="hint">Searching...</div>';
-      try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
-        const data = await res.json();
-        resDiv.innerHTML = "";
-        if (data.length === 0) { resDiv.innerHTML = '<div class="hint">No results found.</div>'; return; }
-        data.forEach(item => {
-          const div = document.createElement('div');
-          div.className = 'search-item';
-          div.innerText = item.display_name;
-          div.onclick = () => {
-            const lat = parseFloat(item.lat); const lon = parseFloat(item.lon);
-            map.setView([lat, lon], 16);
-            log(`Map moved to: ${item.display_name.substring(0, 40)}...`);
-            resDiv.innerHTML = "";
-          };
-          resDiv.appendChild(div);
-        });
-      } catch (err) { resDiv.innerHTML = '<div class="hint">Search failed.</div>'; log("Search error: " + err.message); }
-    });
-    document.getElementById('searchInput').addEventListener('keypress', function (e) { if (e.key === 'Enter') document.getElementById('btnSearch').click(); });
+/* ---------- Bluetooth ---------- */
+function onDisc(){characteristic=null;stopRide(true);refresh();toast("Bike disconnected.")}
+$("bleBtn").onclick=async()=>{
+  if(connected()){device.gatt.disconnect();return}
+  if(!navigator.bluetooth)return toast("Web Bluetooth needs Chrome or Edge on Android or desktop.");
+  try{device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});
+    device.addEventListener("gattserverdisconnected",onDisc);
+    toast("Connecting...");server=await device.gatt.connect();
+    characteristic=await(await server.getPrimaryService(SERVICE_UUID)).getCharacteristic(CHAR_UUID);
+    toast("Bike connected.");refresh();if(routeCoords.length)initWindow(routeCoords)
+  }catch(e){toast("Connection failed: "+e.message);refresh()}};
 
-    document.getElementById('btnMyLocation').addEventListener('click', () => {
-      if (!navigator.geolocation) { alert("Geolocation is not supported."); return; }
-      log("Requesting current location...");
-      const btn = document.getElementById('btnMyLocation');
-      btn.innerText = "Locating..."; btn.disabled = true;
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = pos.coords.latitude; const lon = pos.coords.longitude;
-          map.setView([lat, lon], 16);
-          if (!startMarker) { startMarker = L.marker([lat, lon]).addTo(map).bindPopup("START (My Location)").openPopup(); log("START set to current location."); }
-          else { startMarker.setLatLng([lat, lon]); startMarker.setPopupContent("START (My Location)").openPopup(); log("START updated to current location."); }
-          btn.innerText = "📍 Use My Current Location as START"; btn.disabled = false;
-        },
-        (err) => { log("Location error: " + err.message); alert("Could not get location."); btn.innerText = "📍 Use My Current Location as START"; btn.disabled = false; },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-      );
-    });
+const sleep=ms=>new Promise(r=>setTimeout(r,ms)),asciiOnly=t=>String(t).replace(/[^\x20-\x7E]/g,""),hex2=n=>n.toString(16).padStart(2,"0").toUpperCase();
+let chain=Promise.resolve();
+function serialize(j){const r=chain.then(j,j);chain=r.then(()=>{},()=>{});return r}
+async function rawWrite(pk){
+  for(let i=0;i<5;i++){try{
+    if(characteristic.properties&&characteristic.properties.writeWithoutResponse)await characteristic.writeValueWithoutResponse(pk);else await characteristic.writeValue(pk);return
+  }catch(e){const m=String((e&&e.message)||e);if(!/in progress|networkerror|not supported|gatt|busy|disconnect/i.test(m)||i===4)throw e;await sleep(40*(i+1))}}}
+function sendJson(js){
+  if(!connected())return Promise.reject(new Error("Not connected"));
+  return serialize(async()=>{const a=asciiOnly(js),b=new TextEncoder().encode(a);let off=0,seq=0;
+    while(off<b.length){const cl=Math.min(17,b.length-off),end=off+cl>=b.length?"1":"0";
+      await rawWrite(new TextEncoder().encode(hex2(seq)+end+a.slice(off,off+cl)));off+=cl;seq++;
+      if(seq>255)throw new Error("packet too large");await sleep(8)}})}
 
-    function log(m){const t=new Date().toLocaleTimeString();logDiv.innerHTML+=`[${t}] ${m}<br>`;logDiv.scrollTop=logDiv.scrollHeight;}
-    function setStatus(t,c){statusDiv.innerText=t;statusDiv.style.color=c?"#16a34a":"#dc2626";}
+/* ---------- sliding window ---------- */
+function initWindow(pts){fullPts=pts;chunkEnd=0;sendChunk(0).then(()=>sendJson(JSON.stringify(buildUpdate(0,false,0)))).then(()=>log("Initial map sent.")).catch(e=>log("Init failed: "+e.message))}
+function sendChunk(idx){
+  if(chunkBusy)return Promise.resolve();
+  const s=Math.max(0,idx-OVERLAP);let e=Math.min(s+CHUNK,fullPts.length);
+  if(e<=chunkEnd)return Promise.resolve();
+  const pk={t:"R",pts:fullPts.slice(s,e).map(p=>[round6(p.lat),round6(p.lon)])};chunkBusy=true;
+  return sendJson(JSON.stringify(pk)).then(()=>{chunkEnd=e;chunkBusy=false;log(`map chunk ${s}-${e}`)}).catch(err=>{chunkBusy=false;log("Chunk failed: "+err.message)})}
+function checkUpdate(i){if(chunkEnd-i<=CHUNK-TRIGGER)sendChunk(i)}
 
-    btnConnect.addEventListener("click",async()=>{try{log("Requesting device...");device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}]});log(`Connecting to ${device.name||"?"}...`);server=await device.gatt.connect();const s=await server.getPrimaryService(SERVICE_UUID);characteristic=await s.getCharacteristic(CHARACTERISTIC_UUID);setStatus("CONNECTED",true);btnConnect.style.display="none";btnDisconnect.style.display="block";log("BLE connected.");}catch(e){log("BLE fail: "+e.message);alert("Connection failed: "+e.message);}});
-    btnDisconnect.addEventListener("click",()=>{if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect();setStatus("DISCONNECTED",false);btnConnect.style.display="block";btnDisconnect.style.display="none";stopSimulation();log("Disconnected.");});
+/* ---------- route logic ---------- */
+function simpleRoute(s,e,n=50){const o=[];for(let i=0;i<=n;i++){const t=i/n,cv=Math.sin(t*Math.PI)*.0004;o.push({lat:round6(s.lat+(e.lat-s.lat)*t+cv),lon:round6(s.lng+(e.lng-s.lng)*t-cv),name:"Route"})}return o}
+function plannedSpeed(i){if(routeCoords.length<3)return 18;let sh=0;for(let k=i;k<Math.min(i+6,routeCoords.length-2);k++){const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>25){sh=Math.min(1,(d-25)/60);break}}return Math.round((22-13*sh)*10)/10}
+function distToTurn(i){if(routeCoords.length<3)return 100;let cum=0;for(let k=i;k<routeCoords.length-2;k++){cum+=haversine(routeCoords[k],routeCoords[k+1]);if(Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])))>30)return Math.max(20,Math.round(cum))}return Math.max(20,Math.round((routeCum[routeCum.length-1]-routeCum[i])||100))}
+function turnType(i){if(routeCoords.length<3)return 0;for(let k=i;k<routeCoords.length-2;k++){const d=angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2]));if(d<-150||d>150)return 5;if(d<-30)return 1;if(d>30)return 2}return 0}
+function buildUpdate(index,manual,spdMeasured){
+  const em=manual&&$("manualOverride").checked,si=clamp(index,0,routeCoords.length-1),r=routeCoords[si],nx=routeCoords[Math.min(si+1,routeCoords.length-1)],hdg=bearing(r,nx);
+  let dist,turn,spd,road;
+  if(em){dist=parseInt($("distInput").value||150);turn=parseInt($("turnInput").value||0);spd=parseFloat($("speedInput").value||18);road=sanitizeRoad($("roadInput").value)}
+  else{dist=distToTurn(si);turn=turnType(si);spd=spdMeasured!=null?spdMeasured:plannedSpeed(si);road=sanitizeRoad(r.name||"Route")}
+  return{t:"U",lat:round6(r.lat),lon:round6(r.lon),hdg:Math.round(hdg*10)/10,spd:Math.round(spd*10)/10,dist,turn,road}}
 
-    // --- SERIALIZED BLE WRITER ---
-    function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
-    function asciiOnly(t){return String(t).replace(/[^\x20-\x7E]/g,"");}
-    function hex2(n){return n.toString(16).padStart(2,"0").toUpperCase();}
-    let _writeChain=Promise.resolve();
-    function serialize(job){const result=_writeChain.then(job,job);_writeChain=result.then(()=>{},()=>{});return result;}
-    async function rawWrite(packet){
-      const MAX_TRIES=5;
-      for(let i=0;i<MAX_TRIES;i++){
-        try{
-          if(characteristic.properties&&characteristic.properties.writeWithoutResponse)await characteristic.writeValueWithoutResponse(packet);
-          else await characteristic.writeValue(packet);
-          return;
-        }catch(e){
-          const msg=String((e&&e.message)||e);
-          const transient=/already in progress|in progress|networkerror|operation not supported|gatt|busy|disconnect/i.test(msg);
-          if(!transient||i===MAX_TRIES-1) throw e;
-          await sleep(40*(i+1));
-        }
-      }
-    }
-    async function sendJsonString(js){
-      if(!characteristic||!server||!server.connected) throw new Error("Not connected");
-      return serialize(async()=>{
-        const a=asciiOnly(js),b=new TextEncoder().encode(a),MAX=17;
-        let off=0,seq=0;
-        while(off<b.length){
-          const cl=Math.min(MAX,b.length-off),end=off+cl>=b.length?"1":"0";
-          const hdr=hex2(seq)+end,txt=a.slice(off,off+cl),pk=new TextEncoder().encode(hdr+txt);
-          await rawWrite(pk);
-          off+=cl;seq++;
-          if(seq>255) throw new Error("packet too large");
-          await sleep(8);
-        }
-        log(`sent ${b.length} B`);
-      });
-    }
+$("routeBtn").onclick=async()=>{
+  const s=startM.getLatLng(),e=endM.getLatLng(),sp={lat:s.lat,lon:s.lng},ep={lat:e.lat,lon:e.lng},straight=haversine(sp,ep);
+  const b=$("routeBtn");b.disabled=true;b.textContent="Finding route...";clearRoute();
+  const urls=[];
+  if(GOOGLE_KEY)urls.push(`https://maps.googleapis.com/maps/api/directions/json?origin=${s.lat},${s.lng}&destination=${e.lat},${e.lng}&mode=bicycling&key=${encodeURIComponent(GOOGLE_KEY)}`);
+  urls.push(`https://routing.openstreetmap.de/routed-bike/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
+            `https://router.project-osrm.org/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`);
+  let ex=null;
+  for(const u of urls){try{
+    const res=await fetch(u,{cache:"no-store"});if(!res.ok)continue;const d=await res.json();
+    if(!(u.includes("googleapis")?d.status==="OK":d.code==="Ok"))continue;
+    const g=d.routes&&d.routes[0]&&d.routes[0].geometry;
+    if(g&&g.coordinates&&g.coordinates.length){ex={coords:dedupe(g.coordinates.map(c=>({lat:round6(c[1]),lon:round6(c[0]),name:"Route"}))),dist:d.routes[0].distance||0};break}
+  }catch(err){log("Router error: "+err.message)}}
+  let ok=!!ex;
+  if(ex&&ex.dist>straight*4&&ex.dist>2000){ok=false;log("Route unrealistically long.")}
+  if(ok){routeCoords=ex.coords;drawRoute("#0b7285")}
+  else{routeCoords=simpleRoute(s,e);drawRoute("#12a150");toast("No road route found. Using a straight-line practice path.")}
+  routeCum=computeCum(routeCoords);routeDistM=routeCum[routeCum.length-1];simIndex=0;
+  $("sum").hidden=false;$("sumKm").textContent=fmtKm(routeDistM);$("sumMin").textContent=Math.max(1,Math.round(routeDistM/1000/15*60))+" min";$("sumPts").textContent=routeCoords.length;
+  b.textContent="Get route again";
+  if(connected())initWindow(routeCoords);
+  refresh()};
 
-    // --- SLIDING WINDOW FUNCTIONS ---
-    function initializeSlidingWindow(routeData) {
-        fullRoutePoints = routeData;
-        currentChunkEndIndex = 0;
-        sendNextChunk(0).then(() => {
-            if(routeCoords.length > 0) {
-                const u = buildUpdatePacket(0, false, 0); 
-                return sendJsonString(JSON.stringify(u));
-            }
-        }).then(() => log("Initial map chunk and position sent."));
-    }
+$("resendBtn").onclick=()=>{if(!connected())return toast("Connect the bike first.");if(!routeCoords.length)return toast("Get a route first.");initWindow(routeCoords);toast("Map sent to bike.")};
+$("testBtn").onclick=()=>{if(!connected())return toast("Connect the bike first.");if(!routeCoords.length)return toast("Get a route first.");sendJson(JSON.stringify(buildUpdate(0,true,null))).then(()=>toast("Test packet sent.")).catch(e=>toast("Send failed: "+e.message))};
 
-    function sendNextChunk(riderIndex) {
-        if (isChunkSending) return Promise.resolve(); 
-        let startIdx = Math.max(0, riderIndex - OVERLAP_POINTS);
-        let endIdx = startIdx + CHUNK_SIZE;
-        if (endIdx > fullRoutePoints.length) endIdx = fullRoutePoints.length;
+/* ---------- ride ---------- */
+function hud(u,src){$("hArrow").textContent=ARROWS[u.turn]||"\u2191";$("hDist").textContent=u.turn===6?"Arrived":fmtKm(u.dist);$("hRoad").textContent=u.road;$("hSpd").textContent=Math.round(u.spd);
+  $("hLeft").textContent=fmtKm(Math.max(0,routeDistM-(routeCum[simIndex]||0)));$("hSrc").textContent=src}
+async function lockScreen(){try{if(navigator.wakeLock)wakeLock=await navigator.wakeLock.request("screen")}catch(e){}}
+function stopRide(silent){
+  if(simTimer){clearInterval(simTimer);simTimer=null}
+  if(liveId!=null){navigator.geolocation.clearWatch(liveId);liveId=null}
+  if(gpsMarker){map.removeLayer(gpsMarker);gpsMarker=null}
+  if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null}
+  if(document.body.classList.contains("riding")&&!silent)toast("Ride ended.");
+  document.body.classList.remove("riding")}
+$("stopBtn").onclick=()=>stopRide();
+$("rideBtn").onclick=()=>{
+  if(!connected())return toast("Connect the bike first.");if(!routeCoords.length)return toast("Get a route first.");
+  if(!fullPts.length)initWindow(routeCoords);
+  document.body.classList.add("riding");lockScreen();simIndex=0;
+  mode==="sim"?startSim():startLive()};
 
-        if (endIdx > currentChunkEndIndex) {
-            let chunkPoints = fullRoutePoints.slice(startIdx, endIdx);
-            let packet = { t: "R", pts: chunkPoints.map(p => [round6(p.lat), round6(p.lon)]) };
-            isChunkSending = true;
-            log(`Requesting Map Chunk...`);
-            return sendJsonString(JSON.stringify(packet)).then(() => {
-                currentChunkEndIndex = endIdx;
-                isChunkSending = false; 
-                log(`Sent Map Chunk: ${chunkPoints.length} pts (Index ${startIdx} to ${endIdx})`);
-            }).catch(err => { isChunkSending = false; log("Chunk send failed: " + err.message); });
-        }
-        return Promise.resolve();
-    }
+function closestIdx(lat,lon,cur){let best=cur,min=Infinity;const a=Math.max(0,cur-20),b=Math.min(routeCoords.length,cur+150);
+  for(let i=a;i<b;i++){let d=haversine({lat,lon},routeCoords[i]);if(i<cur)d+=10;if(d<min){min=d;best=i}}
+  return min>100?cur:best}
+function startLive(){
+  if(!navigator.geolocation){toast("This browser has no GPS support.");return stopRide(true)}
+  toast("Waiting for a GPS fix...");
+  liveId=navigator.geolocation.watchPosition(pos=>{
+    const{latitude:lat,longitude:lon,accuracy,speed}=pos.coords;let heading=pos.coords.heading;
+    if(accuracy>30)return;
+    if(!gpsMarker)gpsMarker=L.circleMarker([lat,lon],{color:"#fff",fillColor:"#1971ff",fillOpacity:1,weight:3,radius:8}).addTo(map);else gpsMarker.setLatLng([lat,lon]);
+    map.panTo([lat,lon],{animate:true});
+    const kmh=speed!=null&&speed>=0?speed*3.6:0;let ni=closestIdx(lat,lon,simIndex);if(Math.abs(ni-simIndex)>50)ni=simIndex;simIndex=ni;
+    if(kmh<2||heading==null||isNaN(heading))heading=bearing(routeCoords[simIndex],routeCoords[Math.min(simIndex+1,routeCoords.length-1)]);
+    const u=buildUpdate(simIndex,false,kmh);u.hdg=Math.round(heading*10)/10;
+    sendJson(JSON.stringify(u)).catch(e=>log("Send: "+e.message));checkUpdate(simIndex);hud(u,"Live GPS \u00B1"+Math.round(accuracy)+" m")},
+    err=>{toast("GPS error: "+err.message)},{enableHighAccuracy:true,maximumAge:0,timeout:15000})}
+function startSim(){
+  simDistM=0;simSpd=0;simLastTs=performance.now();
+  gpsMarker=L.circleMarker([routeCoords[0].lat,routeCoords[0].lon],{color:"#fff",fillColor:"#ff6a1f",fillOpacity:1,weight:3,radius:8}).addTo(map);
+  simTimer=setInterval(async()=>{
+    if(sending)return;sending=true;
+    try{const now=performance.now();let dt=clamp((now-simLastTs)/1000,.05,.6);simLastTs=now;
+      const mult=parseFloat($("mult").value)||10,total=routeCum[routeCum.length-1]||1,tgt=plannedSpeed(simIndex)/3.6*mult,nr=simDistM+tgt*dt;let nd;
+      if(nr>=total){nd=0;simIndex=0;simSpd=tgt*3.6;chunkEnd=0;sendChunk(0)}
+      else{nd=nr;let ni=simIndex;while(ni+1<routeCoords.length&&routeCum[ni+1]<=nd)ni++;simSpd+=((Math.abs(nd-simDistM)/dt)*3.6-simSpd)*.3;simIndex=ni}
+      simDistM=nd;const u=buildUpdate(simIndex,false,simSpd);
+      gpsMarker.setLatLng([u.lat,u.lon]);hud(u,"Practice "+mult+"x");
+      await sendJson(JSON.stringify(u));checkUpdate(simIndex)
+    }catch(e){toast("Practice stopped: "+e.message);stopRide(true)}finally{sending=false}},400)}
 
-    function checkRouteUpdate(riderIndex) {
-        let pointsRemainingInChunk = currentChunkEndIndex - riderIndex;
-        if (pointsRemainingInChunk <= (CHUNK_SIZE - TRIGGER_THRESHOLD)) {
-            sendNextChunk(riderIndex);
-        }
-    }
-
-    // --- LIVE GPS FUNCTIONS ---
-    function findClosestRouteIndexSmart(lat, lon, currentIndex) {
-        let minDist = Infinity;
-        let bestIdx = currentIndex;
-        let startSearch = Math.max(0, currentIndex - 20); 
-        let endSearch = Math.min(routeCoords.length, currentIndex + 150);
-        
-        for (let i = startSearch; i < endSearch; i++) {
-            let d = haversine({lat: lat, lon: lon}, routeCoords[i]);
-            if (i < currentIndex) d += 10; 
-            if (d < minDist) { minDist = d; bestIdx = i; }
-        }
-        if (minDist > 100) return currentIndex;
-        return bestIdx;
-    }
-
-    btnLiveRide.addEventListener("click", () => {
-        if (liveWatchId) {
-            navigator.geolocation.clearWatch(liveWatchId);
-            liveWatchId = null;
-            btnLiveRide.innerText = "5. Start Live GPS Ride";
-            btnLiveRide.style.background = "#10b981";
-            if(rawGpsMarker) map.removeLayer(rawGpsMarker);
-            log("Live GPS tracking stopped.");
-            return;
-        }
-
-        if (!navigator.geolocation) { alert("GPS not supported"); return; }
-        if(routeCoords.length === 0) { alert("Fetch a route first!"); return; }
-        
-        log("Requesting High-Accuracy GPS...");
-        btnLiveRide.innerText = "Tracking GPS...";
-        btnLiveRide.style.background = "#ef4444"; 
-
-        liveWatchId = navigator.geolocation.watchPosition(
-            (pos) => {
-                const lat = pos.coords.latitude;
-                const lon = pos.coords.longitude;
-                const accuracy = pos.coords.accuracy;
-
-                if (accuracy > 30) { return; }
-
-                if (!rawGpsMarker) {
-                    rawGpsMarker = L.circleMarker([lat, lon], {color: 'red', radius: 6, fillOpacity: 0.8}).addTo(map).bindPopup("Raw GPS");
-                } else { rawGpsMarker.setLatLng([lat, lon]); }
-
-                let speedKmh = (pos.coords.speed !== null && pos.coords.speed >= 0) ? (pos.coords.speed * 3.6) : 0; 
-                let heading = pos.coords.heading;
-
-                let newIdx = findClosestRouteIndexSmart(lat, lon, simIndex);
-                if (Math.abs(newIdx - simIndex) > 50) { newIdx = simIndex; }
-                simIndex = newIdx;
-
-                if (speedKmh < 2.0 || isNaN(heading) || heading === null) {
-                    let nextIdx = Math.min(simIndex + 1, routeCoords.length - 1);
-                    heading = bearing(routeCoords[simIndex], routeCoords[nextIdx]);
-                }
-
-                const u = buildUpdatePacket(simIndex, false, speedKmh);
-                u.hdg = Math.round(heading * 10) / 10; 
-                
-                sendJsonString(JSON.stringify(u));
-                checkRouteUpdate(simIndex);
-
-                if (simIndex % 5 === 0) { log(`LIVE GPS: idx=${simIndex} spd=${speedKmh.toFixed(1)}km/h acc=${Math.round(accuracy)}m`); }
-            },
-            (err) => { log("GPS Error: " + err.message); },
-            { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
-        );
-    });
-
-    function toRad(d){return d*Math.PI/180;} function toDeg(r){return r*180/Math.PI;}
-    function round6(v){return Math.round(v*1e6)/1e6;} function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
-    function haversine(p1,p2){const R=6371000,dLa=toRad(p2.lat-p1.lat),dLo=toRad(p2.lon-p1.lon);const a=Math.sin(dLa/2)**2+Math.cos(toRad(p1.lat))*Math.cos(toRad(p2.lat))*Math.sin(dLo/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
-    function bearing(p1,p2){const f1=toRad(p1.lat),f2=toRad(p2.lat),dl=toRad(p2.lon-p1.lon);const y=Math.sin(dl)*Math.cos(f2),x=Math.cos(f1)*Math.sin(f2)-Math.sin(f1)*Math.cos(f2)*Math.cos(dl);return (toDeg(Math.atan2(y,x))+360)%360;}
-    function angleDiff(a,b){return ((b-a+540)%360)-180;}
-    function sanitizeRoad(t){return String(t||"").replace(/[^A-Za-z0-9 .,_-]/g,"").substring(0,20).trim()||"Route";}
-
-    function computeCum(c){const a=[0];for(let i=1;i<c.length;i++)a.push(a[i-1]+haversine(c[i-1],c[i]));return a;}
-    function generateSimpleRoute(s,e,steps=50){const o=[];for(let i=0;i<=steps;i++){const t=i/steps,la=s.lat+(e.lat-s.lat)*t,lo=s.lng+(e.lng-s.lng)*t,cv=Math.sin(t*Math.PI)*0.0004;o.push({lat:round6(la+cv),lon:round6(lo-cv),name:"Route"});}return o;}
-    function dedupe(p){const o=[];for(const q of p){const l=o[o.length-1];if(!l||l.lat!==q.lat||l.lon!==q.lon)o.push(q);}return o;}
-    function drawRoute(col){if(!routeCoords.length)return;if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col||"blue",weight:5}).addTo(map);map.fitBounds(routeLine.getBounds());}
-    function ensureRoute(){if(routeCoords.length){if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);return true;}if(startMarker&&endMarker){const s=startMarker.getLatLng(),e=endMarker.getLatLng();routeCoords=generateSimpleRoute(s,e,50);routeCumulative=computeCum(routeCoords);drawRoute("green");log("Fallback route generated.");return true;}return false;}
-    function plannedSpeedKmh(i){if(routeCoords.length<3)return 18;let sh=0;for(let k=i;k<Math.min(i+6,routeCoords.length-2);k++){const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>25){sh=Math.min(1,(d-25)/60);break;}}return Math.round((22-(22-9)*sh)*10)/10;}
-    function estimateDistanceToTurn(i){if(routeCoords.length<3)return 100;if(!routeCumulative.length)routeCumulative=computeCum(routeCoords);let cum=0;for(let k=i;k<routeCoords.length-2;k++){cum+=haversine(routeCoords[k],routeCoords[k+1]);const d=Math.abs(angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2])));if(d>30)return Math.max(20,Math.round(cum));}return Math.max(20,Math.round((routeCumulative[routeCumulative.length-1]-routeCumulative[i])||100));}
-    function estimateTurnType(i){if(routeCoords.length<3)return 0;for(let k=i;k<routeCoords.length-2;k++){const d=angleDiff(bearing(routeCoords[k],routeCoords[k+1]),bearing(routeCoords[k+1],routeCoords[k+2]));if(d<-150||d>150)return 5;if(d<-30)return 1;if(d>30)return 2;}return 0;}
-
-    function buildUpdatePacket(index,manual,spdMeasured){
-      const ov=document.getElementById("manualOverride").checked, em=manual&&ov;
-      if(!ensureRoute()){const c=map.getCenter();return {t:"U",lat:round6(c.lat),lon:round6(c.lng),hdg:45,spd:em?parseFloat(document.getElementById("speedInput").value||18):(spdMeasured!=null?spdMeasured:18),dist:em?parseInt(document.getElementById("distInput").value||150):150,turn:em?parseInt(document.getElementById("turnInput").value||0):0,road:em?sanitizeRoad(document.getElementById("roadInput").value):"Fake Route"};}
-      const si=clamp(index,0,routeCoords.length-1),r=routeCoords[si],nx=routeCoords[Math.min(si+1,routeCoords.length-1)],hdg=bearing(r,nx);
-      let dist,turn,spd,road;
-      if(em){dist=parseInt(document.getElementById("distInput").value||150);turn=parseInt(document.getElementById("turnInput").value||0);spd=parseFloat(document.getElementById("speedInput").value||18);road=sanitizeRoad(document.getElementById("roadInput").value);}
-      else{dist=estimateDistanceToTurn(si);turn=estimateTurnType(si);spd=(spdMeasured!=null)?spdMeasured:plannedSpeedKmh(si);road=sanitizeRoad(r.name||"Route");}
-      return {t:"U",lat:round6(r.lat),lon:round6(r.lon),hdg:Math.round(hdg*10)/10,spd:Math.round(spd*10)/10,dist,turn,road};
-    }
-
-    btnFetchRoute.addEventListener("click",async()=>{
-      if(!startMarker||!endMarker){alert("Set START and END first.");return;}
-      const s=startMarker.getLatLng(),e=endMarker.getLatLng(),sp={lat:s.lat,lon:s.lng},ep={lat:e.lat,lon:e.lng},straight=haversine(sp,ep);
-      log("Fetching route...");log(`Straight-line: ${(straight/1000).toFixed(2)} km`);
-      const urls=[];
-      if(GOOGLE_KEY){urls.push(`https://maps.googleapis.com/maps/api/directions/json?origin=${s.lat},${s.lng}&destination=${e.lat},${e.lng}&mode=bicycling&language=en&key=${encodeURIComponent(GOOGLE_KEY)}`);urls.push(`https://maps.googleapis.com/maps/api/directions/json?origin=${s.lat},${s.lng}&destination=${e.lat},${e.lng}&mode=driving&language=en&key=${encodeURIComponent(GOOGLE_KEY)}`);}
-      urls.push(`https://routing.openstreetmap.de/routed-bike/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`);
-      urls.push(`https://router.project-osrm.org/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`);
-
-      let ex=null, le=null;
-      for(const u of urls){
-        const isGoogle=u.includes("googleapis.com");
-        try{
-          log(isGoogle?"Trying Google Directions...":"Trying OSRM...");
-          const res=await fetch(u,{headers:{Accept:"application/json"},cache:"no-store"});
-          if(!res.ok){ le=new Error(`HTTP ${res.status}`); log("Failed: "+le.message); continue; }
-          const d=await res.json();
-          const ok = isGoogle ? (d.status==="OK") : (d.code==="Ok");
-          if(!ok){ le=new Error(d.status||d.message||"not ok"); log("Failed: "+le.message); continue; }
-          let coords=[];
-          if(d.routes && d.routes[0]){
-             if(d.routes[0].geometry && d.routes[0].geometry.coordinates){ 
-                 coords = d.routes[0].geometry.coordinates.map(c=>({lat:round6(c[1]),lon:round6(c[0]),name:"Route"}));
-             }
-          }
-          if(coords.length > 0) { ex={coords:dedupe(coords), distanceM:d.routes[0].distance||0}; log(isGoogle?"Google route loaded.":"OSRM route loaded."); break; }
-        }catch(err){ le=err; log("Fetch error: "+err.message); }
-      }
-
-      if(ex){routeCoords=ex.coords;log(`Route: ${routeCoords.length} pts, ${(ex.distanceM/1000).toFixed(2)} km`);if(ex.distanceM>straight*4&&ex.distanceM>2000){log("Route unrealistically long -> fallback.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}else drawRoute("blue");}
-      else{log("All routers failed -> generated fallback route.");routeCoords=generateSimpleRoute(s,e,50);drawRoute("green");}
-      routeCumulative=computeCum(routeCoords);simIndex=0;
-      log(`Route stored: ${routeCoords.length} pts`);
-      
-      btnLiveRide.style.display = "block"; 
-
-      if(characteristic&&server&&server.connected){
-          initializeSlidingWindow(routeCoords);
-      }
-    });
-
-    btnSendOnce.addEventListener("click",async()=>{
-        if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
-        if(fullRoutePoints.length === 0 && routeCoords.length > 0) initializeSlidingWindow(routeCoords);
-        sendNextChunk(0);
-        log("Sent initial map chunk.");
-    });
-
-    function stopSimulation(){if(simTimer){clearInterval(simTimer);simTimer=null;}btnSimulate.innerText="4. Simulate Ride (Fake)";log("Simulation stopped.");}
-    btnSimulate.addEventListener("click",async()=>{
-      if(!characteristic||!server||!server.connected){alert("Connect first.");return;}
-      if(!ensureRoute()){alert("Set START/END and Fetch Route first.");return;}
-      if(simTimer){stopSimulation();return;}
-      if(liveWatchId){navigator.geolocation.clearWatch(liveWatchId);liveWatchId=null;btnLiveRide.innerText="5. Start Live GPS Ride";btnLiveRide.style.background="#10b981";}
-      
-      if(fullRoutePoints.length === 0) initializeSlidingWindow(routeCoords);
-      
-      simIndex=0;simDistM=0;simSpdSmooth=0;simLastTs=performance.now();
-      btnSimulate.innerText="Stop Simulation";log("Simulation started (measured speed).");
-      simTimer=setInterval(async()=>{
-        if(sending)return;sending=true;
-        try{
-          const now=performance.now();let dt=(now-simLastTs)/1000;simLastTs=now;dt=clamp(dt,0.05,0.6);
-          const speedMult = parseFloat(document.getElementById('simSpeedMult').value) || 10;
-          const total=routeCumulative[routeCumulative.length-1]||1, tgt=(plannedSpeedKmh(simIndex)/3.6) * speedMult;
-          const ndRaw=simDistM+tgt*dt;
-          let nd,measured;
-          if(ndRaw >= total) {
-            nd = 0; 
-            simIndex = 0; 
-            measured = tgt * 3.6; 
-            simSpdSmooth = measured;
-            currentChunkEndIndex = 0; 
-            sendNextChunk(0); 
-          } else {
-            nd=ndRaw;
-            let ni=simIndex; while(ni+1<routeCoords.length&&routeCumulative[ni+1]<=nd)ni++;
-            measured=(Math.abs(nd-simDistM)/dt)*3.6;
-            simSpdSmooth+=(measured-simSpdSmooth)*0.3;
-            simIndex=ni;
-          }
-          simDistM=nd;
-          
-          const u=buildUpdatePacket(simIndex,false,simSpdSmooth);
-          await sendJsonString(JSON.stringify(u));
-          checkRouteUpdate(simIndex);
-          log(`U idx=${simIndex} dist=${u.dist} turn=${u.turn} spd=${u.spd} road="${u.road}"`);
-        }catch(e){log("Sim error: "+e.message);stopSimulation();}finally{sending=false;}
-      },400);
-    });
-
-    document.getElementById('simSpeedMult').addEventListener('input', function() {
-        document.getElementById('speedMultVal').innerText = this.value;
-    });
-  </script>
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&document.body.classList.contains("riding"))lockScreen()});
+refresh();
+</script>
 </body>
 </html>
