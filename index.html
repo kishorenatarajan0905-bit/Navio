@@ -52,6 +52,24 @@ label{display:block;font-size:12px;font-weight:600;margin:10px 0 4px;color:var(-
 .mk{width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
 .toast{position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:1200;background:var(--ink);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .25s}.toast.show{opacity:1}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* compact unit */
+body{font-size:13px}
+.sheet{padding:8px 10px max(10px,env(safe-area-inset-bottom));max-height:55vh;border-radius:16px 16px 0 0}
+.head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;font-weight:600}
+#headTxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.min-btn{padding:2px 10px;background:#ebeae2;color:var(--ink);border-radius:8px;font-size:16px;line-height:1.2}
+.sheet.min>:not(.head){display:none}.sheet.min .head{margin:0}
+button{padding:8px 10px;border-radius:10px;font-size:13px}
+.steps{gap:4px;margin-bottom:8px}.step{font-size:11px;padding:4px 2px;border-radius:6px}
+.msg{margin:0 0 6px;font-size:12px}
+.sum{gap:14px;margin:0 0 6px}.sum b{font-size:16px}.sum span{font-size:11px}
+.seg{margin-bottom:6px}.seg button{padding:6px}
+.hud{padding:8px 10px;margin-bottom:6px;gap:0 10px}#hArrow{font-size:38px;width:50px}#hDist{font-size:22px}
+.hstats{margin-bottom:6px}.hstats b{font-size:15px}
+input,select{padding:7px;font-size:13px}label{margin:6px 0 3px}
+#logs{height:90px}
+@media(min-width:700px){.sheet{left:12px;right:auto;bottom:12px;width:290px;margin:0;border-radius:16px;max-height:62vh}}
 </style>
 </head>
 <body>
@@ -69,7 +87,7 @@ label{display:block;font-size:12px;font-weight:600;margin:10px 0 4px;color:var(-
 <div class="toast" id="toast" role="status"></div>
 
 <div class="sheet" id="sheet">
-  <div class="grip"></div>
+  <div class="head"><span id="headTxt">Bike Nav</span><button class="min-btn" id="minBtn" aria-label="Collapse or expand panel" title="Collapse / expand">&#8212;</button></div>
 
   <div id="plan">
     <div class="steps">
@@ -160,7 +178,7 @@ map.on("click",e=>{
 
 function clearRoute(){if(routeLine)map.removeLayer(routeLine);routeLine=null;routeCoords=[];routeCum=[];fullPts=[];chunkEnd=0;routeDistM=0;$("sum").hidden=true}
 function clearAll(){[startM,endM].forEach(m=>m&&map.removeLayer(m));startM=endM=null;clearRoute();refresh()}
-function drawRoute(col){if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col,weight:6,opacity:.9}).addTo(map);map.fitBounds(routeLine.getBounds(),{paddingBottomRight:[20,260],paddingTopLeft:[20,80]})}
+function drawRoute(col){if(routeLine)map.removeLayer(routeLine);routeLine=L.polyline(routeCoords.map(p=>[p.lat,p.lon]),{color:col,weight:6,opacity:.9}).addTo(map);map.fitBounds(routeLine.getBounds(),{paddingBottomRight:[20,innerWidth<700?220:20],paddingTopLeft:[innerWidth<700?20:320,80]})}
 $("clearBtn").onclick=clearAll;
 $("swapBtn").onclick=()=>{if(!startM||!endM)return toast("Set both pins first.");const a=startM.getLatLng();startM.setLatLng(endM.getLatLng());endM.setLatLng(a);clearRoute();refresh()};
 
@@ -175,6 +193,7 @@ function refresh(){
     :!startM?"Tap the map to set your start, or use the location button."
     :!endM?"Now tap your destination."
     :!has?"Pins set. Get the route to continue.":"Route ready. Choose a ride mode and start.";
+  $("headTxt").textContent=routeCoords.length?`Route ready · ${fmtKm(routeDistM)}`:$("hint").textContent;
   $("routeBtn").disabled=!(startM&&endM);
   $("rideBtn").disabled=!(has&&c);
   $("bleBtn").classList.toggle("on",c);$("bleTxt").textContent=c?(device&&device.name||"Connected"):"Connect bike";
@@ -321,6 +340,7 @@ function startSim(){
       await sendJson(JSON.stringify(u));checkUpdate(simIndex)
     }catch(e){toast("Practice stopped: "+e.message);stopRide(true)}finally{sending=false}},400)}
 
+$("minBtn").onclick=()=>{const m=$("sheet").classList.toggle("min");$("minBtn").innerHTML=m?"&#9633;":"&#8212;"};
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&document.body.classList.contains("riding"))lockScreen()});
 refresh();
 </script>
