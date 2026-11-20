@@ -107,11 +107,12 @@ input,select{padding:7px;font-size:13px}label{margin:6px 0 3px}
       <div class="step" id="s1">1 Connect</div><div class="step" id="s2">2 Pick route</div><div class="step" id="s3">3 Ride</div>
     </div>
     <p class="msg" id="hint">Tap the map to set your start, then tap again for your destination.</p>
-    <div class="sum" id="sum" hidden><div><b id="sumKm">-</b><span>distance</span></div><div><b id="sumMin">-</b><span>bike time</span></div><div><b id="sumPts">-</b><span>points</span></div></div>
+    <div class="sum" id="sum" hidden><div><b id="sumKm">-</b><span>distance</span></div><div><b id="sumMin">-</b><span>est. time</span></div><div><b id="sumPts">-</b><span>via</span></div></div>
     <div class="row" style="margin-bottom:8px">
       <button class="ghost" id="swapBtn">Swap start/end</button>
       <button class="ghost" id="clearBtn">Clear</button>
     </div>
+    <div class="seg" id="vehSeg"><button class="act" data-v="bike">Bike route</button><button data-v="car">Car route</button></div>
     <button id="routeBtn" class="sig" style="width:100%;margin-bottom:10px">Get route</button>
     <div class="seg" id="modeSeg"><button class="act" data-m="live">Live GPS ride</button><button data-m="sim">Practice (simulated)</button></div>
     <div id="simBox" hidden>
@@ -124,6 +125,8 @@ input,select{padding:7px;font-size:13px}label{margin:6px 0 3px}
       <summary>Advanced</summary>
       <label>Map style</label>
       <select id="mapStyle"><option value="esri">Streets (Esri)</option><option value="osm">OpenStreetMap</option><option value="google">Google tiles (demo only)</option></select>
+      <label>OpenRouteService key (optional, better routes)</label>
+      <input type="password" id="orsKey" placeholder="Paste free key from openrouteservice.org" autocomplete="off">
       <div class="row" style="margin-top:10px"><button class="ghost" id="resendBtn">Resend map to bike</button><button class="ghost" id="testBtn">Send test packet</button></div>
       <label class="chk" style="margin-top:12px"><input type="checkbox" id="manualOverride"> Manual override (testing only)</label>
       <label>Distance to turn (m)</label><input type="number" id="distInput" value="150" min="0">
@@ -285,25 +288,27 @@ function buildUpdate(index,manual,spdMeasured){
   return{t:"U",lat:round6(r.lat),lon:round6(r.lon),hdg:Math.round(hdg*10)/10,spd:Math.round(spd*10)/10,dist,turn,road}}
 
 $("routeBtn").onclick=async()=>{
-  const s=startM.getLatLng(),e=endM.getLatLng(),sp={lat:s.lat,lon:s.lng},ep={lat:e.lat,lon:e.lng},straight=haversine(sp,ep);
+  const s=startM.getLatLng(),e=endM.getLatLng(),straight=haversine({lat:s.lat,lon:s.lng},{lat:e.lat,lon:e.lng}),car=vehicle==="car";
   const b=$("routeBtn");b.disabled=true;b.textContent="Finding route...";clearRoute();
-  const urls=[];
-  if(GOOGLE_KEY)urls.push(`https://maps.googleapis.com/maps/api/directions/json?origin=${s.lat},${s.lng}&destination=${e.lat},${e.lng}&mode=bicycling&key=${encodeURIComponent(GOOGLE_KEY)}`);
-  urls.push(`https://routing.openstreetmap.de/routed-bike/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`,
-            `https://router.project-osrm.org/route/v1/driving/${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`);
-  let ex=null;
-  for(const u of urls){try{
-    const res=await fetch(u,{cache:"no-store"});if(!res.ok)continue;const d=await res.json();
-    if(!(u.includes("googleapis")?d.status==="OK":d.code==="Ok"))continue;
-    const g=d.routes&&d.routes[0]&&d.routes[0].geometry;
-    if(g&&g.coordinates&&g.coordinates.length){ex={coords:dedupe(g.coordinates.map(c=>({lat:round6(c[1]),lon:round6(c[0]),name:"Route"}))),dist:d.routes[0].distance||0};break}
-  }catch(err){log("Router error: "+err.message)}}
-  let ok=!!ex;
-  if(ex&&ex.dist>straight*4&&ex.dist>2000){ok=false;log("Route unrealistically long.")}
-  if(ok){routeCoords=ex.coords;drawRoute("#0b7285")}
+  const key=$("orsKey").value.trim(),conv=c=>dedupe(c.map(p=>({lat:round6(p[1]),lon:round6(p[0]),name:"Route"})));let ex=null;
+  if(key){try{
+    const r=await fetch(`https://api.openrouteservice.org/v2/directions/${car?"driving-car":"cycling-regular"}/geojson`,{method:"POST",headers:{"Content-Type":"application/json",Authorization:key},body:JSON.stringify({coordinates:[[s.lng,s.lat],[e.lng,e.lat]]})});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    const f=((await r.json()).features||[])[0];
+    if(f&&f.geometry.coordinates.length){const sm=f.properties.summary||{};ex={coords:conv(f.geometry.coordinates),dist:sm.distance||0,dur:sm.duration||0,src:"ORS"}}
+  }catch(err){log("OpenRouteService failed: "+err.message+" (trying OSRM)")}}
+  if(!ex){const q=`${s.lng},${s.lat};${e.lng},${e.lat}?overview=full&geometries=geojson`;
+    for(const u of [`https://routing.openstreetmap.de/${car?"routed-car":"routed-bike"}/route/v1/driving/${q}`,`https://router.project-osrm.org/route/v1/driving/${q}`]){try{
+      const res=await fetch(u,{cache:"no-store"});if(!res.ok)continue;const d=await res.json();if(d.code!=="Ok")continue;
+      const rt=d.routes&&d.routes[0];if(rt&&rt.geometry&&rt.geometry.coordinates.length){ex={coords:conv(rt.geometry.coordinates),dist:rt.distance||0,dur:0,src:"OSRM"};break}
+    }catch(err){log("Router error: "+err.message)}}}
+  if(ex&&ex.dist>straight*4&&ex.dist>2000){log("Route unrealistically long.");ex=null}
+  if(ex){routeCoords=ex.coords;drawRoute("#0b7285")}
   else{routeCoords=simpleRoute(s,e);drawRoute("#12a150");toast("No road route found. Using a straight-line practice path.")}
   routeCum=computeCum(routeCoords);routeDistM=routeCum[routeCum.length-1];simIndex=0;
-  $("sum").hidden=false;$("sumKm").textContent=fmtKm(routeDistM);$("sumMin").textContent=Math.max(1,Math.round(routeDistM/1000/15*60))+" min";$("sumPts").textContent=routeCoords.length;
+  const mins=ex&&ex.dur?Math.round(ex.dur/60):Math.round(routeDistM/1000/(car?30:15)*60);
+  $("sum").hidden=false;$("sumKm").textContent=fmtKm(routeDistM);$("sumMin").textContent=Math.max(1,mins)+" min";$("sumPts").textContent=ex?ex.src:"Straight";
+  log(`${car?"Car":"Bike"} route via ${ex?ex.src:"fallback"}: ${routeCoords.length} pts`);
   b.textContent="Get route again";
   if(connected())initWindow(routeCoords);
   refresh()};
@@ -375,6 +380,14 @@ $("dRide").onclick=()=>{if(document.body.classList.contains("riding"))return sto
 $("dSet").onclick=()=>expand(true);
 $("minBtn").onclick=()=>expand(false);
 updateDock();
+/* vehicle + ORS key */
+let vehicle="bike";
+try{vehicle=localStorage.getItem("bn_veh")||"bike";$("orsKey").value=localStorage.getItem("bn_ors")||""}catch(e){}
+function paintVeh(){document.querySelectorAll("#vehSeg button").forEach(x=>x.classList.toggle("act",x.dataset.v===vehicle))}
+document.querySelectorAll("#vehSeg button").forEach(b=>b.onclick=()=>{if(vehicle===b.dataset.v)return;vehicle=b.dataset.v;paintVeh();try{localStorage.setItem("bn_veh",vehicle)}catch(e){}
+  if(routeCoords.length){clearRoute();refresh();toast("Switched to "+vehicle+". Get the route again.")}});
+$("orsKey").onchange=()=>{try{localStorage.setItem("bn_ors",$("orsKey").value.trim())}catch(e){}toast("Routing key saved.")};
+paintVeh();
 refresh();
 </script>
 </body>
